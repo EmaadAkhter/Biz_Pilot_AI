@@ -28,8 +28,8 @@ if not AZURE_SAS_TOKEN:
     raise RuntimeError("Missing required environment variable: AZURE_SAS_TOKEN")
 
 # Fix: Proper Azure Blob Service Client initialization
-account_url = f"{AZURE_SAS_URL}?{AZURE_SAS_TOKEN}"
-#sas_token = AZURE_SAS_TOKEN.lstrip('?')  # Remove leading ? if present
+account_url = AZURE_SAS_URL
+sas_token = AZURE_SAS_TOKEN  # Remove leading ? if present
 
 try:
     blob_service_client = BlobServiceClient(
