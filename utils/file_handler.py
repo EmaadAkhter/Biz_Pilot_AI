@@ -11,11 +11,12 @@ from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError
 # ========== CONFIG ==========
 AZURE_ACCOUNT_NAME = os.getenv("AZURE_ACCOUNT_NAME")
 AZURE_SAS_TOKEN = os.getenv("AZURE_SAS_TOKEN")
+AZURE_SAS_URL=os.getenv("AZURE_STORAGE_URL")
 CONTAINER_NAME = "salesdata"
 MAX_FILE_SIZE = 100 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'.csv', '.xlsx', '.xls'}
 
-account_url = f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net/?{AZURE_SAS_TOKEN}"
+account_url = f"{AZURE_SAS_URL}"
 blob_service_client = BlobServiceClient(account_url=account_url)
 
 
