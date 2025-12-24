@@ -1,125 +1,113 @@
 from fastmcp import FastMCP
 from dotenv import load_dotenv
+import pandas as pd
 
-# Import utility functions
 from utils.analytics import analyze_sales_data
 from utils.forecast import forecast_demand
-from utils.file_handler import list_files, get_file_path
+from utils.file_handler import get_user_files, load_dataframe, get_file_path
 
 load_dotenv()
 
-# Create FastMCP server instance
 mcp = FastMCP("bizpilot-analytics")
 
 
 @mcp.tool()
-def list_available_files(user_hash: str = None) -> dict:
-    """List all available sales data files that can be analyzed.
+def list_available_files(user_id: str) -> dict:
+    """List all available sales data files for a user.
 
     Args:
-        user_hash: Optional user hash prefix to filter files
+        user_id: The user's ID
 
     Returns:
-        Dictionary with status and list of available files
+        Dictionary with list of available files
     """
     try:
-        files = list_files(user_hash)
+        files = get_user_files(user_id)
         return {
             "status": "success",
             "total_files": len(files),
             "files": files
         }
     except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
 
 
 @mcp.tool()
-def analyze_sales_file(filename: str) -> dict:
-    """Analyze sales data from an uploaded file and return comprehensive statistics.
+def analyze_sales_file(filename: str, user_id: str) -> dict:
+    """Analyze sales data from an uploaded file.
 
-    Returns statistics including:
+    Returns:
     - Total sales, averages, max/min values
     - Top and bottom products
     - Daily/weekly/monthly trends
-    - Sales by category and region (if available)
+    - Sales by category and region
 
     Args:
-        filename: Name of the uploaded sales data file
+        filename: Name or blob_name of the file
+        user_id: The user's ID
 
     Returns:
         Dictionary with comprehensive sales analytics
     """
     try:
-        filepath = get_file_path(filename)
-        analytics = analyze_sales_data(filepath)
+        blob_name = get_file_path(filename, user_id)
+        df = load_dataframe(blob_name, user_id)
+        analytics = analyze_sales_data(df)
         return analytics
     except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
 
 
 @mcp.tool()
-def query_sales_data(filename: str, question: str) -> dict:
-    """Get detailed sales data to answer specific questions about the data.
-
-    This returns raw statistics that you (the LLM) should interpret and explain.
+def query_sales_data(filename: str, user_id: str, question: str) -> dict:
+    """Answer specific questions about sales data.
 
     Args:
-        filename: Name of the uploaded sales data file
-        question: The user's question about the sales data
+        filename: Name or blob_name of the file
+        user_id: The user's ID
+        question: The user's question about the data
 
     Returns:
-        Dictionary with the question and comprehensive data summary to analyze
+        Data summary with instructions for analysis
     """
     try:
-        filepath = get_file_path(filename)
-        analytics = analyze_sales_data(filepath)
+        blob_name = get_file_path(filename, user_id)
+        df = load_dataframe(blob_name, user_id)
+        analytics = analyze_sales_data(df)
 
         return {
             "question": question,
             "data_summary": analytics,
-            "instruction": "Analyze the data_summary above and provide a clear, specific answer to the user's question. Include relevant numbers, trends, and actionable insights."
+            "instruction": "Analyze the data_summary and provide a clear answer to the user's question with specific numbers and insights."
         }
     except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
 
 
 @mcp.tool()
-def forecast_sales_demand(filename: str, periods: int = 30) -> dict:
-    """Forecast future sales demand using Facebook Prophet time series model.
+def forecast_sales_demand(filename: str, user_id: str, periods: int = 30) -> dict:
+    """Forecast future sales demand using Facebook Prophet.
 
     Returns predictions with confidence intervals and trend analysis.
 
     Args:
-        filename: Name of the uploaded sales data file with historical sales
-        periods: Number of future periods (days) to forecast (default: 30, max: 365)
+        filename: Name or blob_name of the file
+        user_id: The user's ID
+        periods: Number of days to forecast (1-365, default: 30)
 
     Returns:
-        Dictionary with forecast data, trend analysis, and model information
+        Forecast data with trend analysis
     """
     try:
         if periods < 1 or periods > 365:
-            return {
-                "status": "error",
-                "message": "Periods must be between 1 and 365"
-            }
+            return {"status": "error", "message": "Periods must be between 1 and 365"}
 
-        filepath = get_file_path(filename)
-        result = forecast_demand(filepath, periods)
+        blob_name = get_file_path(filename, user_id)
+        df = load_dataframe(blob_name, user_id)
+        result = forecast_demand(df, periods)
         return result
     except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
 
 
 @mcp.tool()
@@ -131,24 +119,18 @@ def conduct_market_research(
 ) -> dict:
     """Conduct comprehensive market research analysis.
 
-    Returns a structured framework of research areas that you should investigate
-    using web search and your knowledge.
-
     Args:
         idea: Business idea or product description
-        target_customer: Target customer segment or persona
+        target_customer: Target customer segment
         geography: Geographic market (e.g., 'USA', 'India', 'Global')
-        depth_level: Research depth (1=Quick scan, 2=Medium depth, 3=Deep analysis)
+        depth_level: Research depth (1=Quick, 2=Medium, 3=Deep)
 
     Returns:
-        Dictionary with research framework and areas to investigate
+        Research framework with areas to investigate
     """
     try:
         if depth_level not in [1, 2, 3]:
-            return {
-                "status": "error",
-                "message": "depth_level must be 1, 2, or 3"
-            }
+            return {"status": "error", "message": "depth_level must be 1, 2, or 3"}
 
         research_framework = {
             "idea": idea,
@@ -160,46 +142,41 @@ def conduct_market_research(
 
         if depth_level == 1:
             research_framework["research_areas"] = {
-                "market_size": "Provide rough market size estimate",
-                "competitors": "List top 3-5 competitors",
+                "market_size": "Rough market size estimate",
+                "competitors": "Top 3-5 competitors",
                 "swot": "Brief SWOT analysis",
                 "opportunities": "2-3 key opportunity areas"
             }
         elif depth_level == 2:
             research_framework["research_areas"] = {
                 "market_size": "Market size with growth trends",
-                "competitors": "Detailed competitor analysis (products, pricing, positioning)",
-                "customer_pain_points": "Key pain points of target customers",
-                "existing_solutions": "Current solutions and their limitations",
-                "demand_signals": "Market demand indicators and trends",
-                "opportunities": "Strategic opportunities with reasoning"
+                "competitors": "Detailed competitor analysis",
+                "customer_pain_points": "Key pain points",
+                "existing_solutions": "Current solutions and gaps",
+                "demand_signals": "Market demand indicators",
+                "opportunities": "Strategic opportunities"
             }
-        else:  # depth_level == 3
+        else:
             research_framework["research_areas"] = {
                 "executive_summary": "High-level overview",
                 "market_size_and_growth": "Comprehensive market analysis",
                 "competitive_intelligence": "Full competitive landscape",
-                "feature_gap_analysis": "What's missing in the market",
+                "feature_gap_analysis": "Market gaps",
                 "market_segmentation": "Customer segments and sizing",
-                "geographic_trends": "Regional variations and opportunities",
-                "customer_sentiment": "Customer feedback and sentiment analysis",
-                "porters_five_forces": "Industry structure analysis",
-                "marketing_mix_7ps": "Product, Price, Place, Promotion, People, Process, Physical Evidence",
+                "geographic_trends": "Regional variations",
+                "customer_sentiment": "Customer feedback analysis",
+                "porters_five_forces": "Industry structure",
+                "marketing_mix": "Product, Price, Place, Promotion, People, Process, Physical Evidence",
                 "strategic_recommendations": "Actionable recommendations"
             }
 
-        research_framework[
-            "instruction"] = f"Use web search and your knowledge to research each area listed above. Provide detailed, data-driven insights for a depth level {depth_level} analysis."
+        research_framework["instruction"] = f"Use web search to research each area. Provide data-driven insights for depth level {depth_level}."
 
         return research_framework
 
     except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
 
 
 if __name__ == "__main__":
-    # Run the MCP server
     mcp.run()

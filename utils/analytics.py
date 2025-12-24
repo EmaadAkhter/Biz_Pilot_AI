@@ -1,12 +1,8 @@
 import pandas as pd
 
 
-def analyze_sales_data(filepath: str) -> dict:
+def analyze_sales_data(df: pd.DataFrame) -> dict:
     """Analyze sales data and return comprehensive statistics for visualization"""
-    if filepath.endswith('.csv'):
-        df = pd.read_csv(filepath)
-    else:
-        df = pd.read_excel(filepath)
 
     # Auto-detect columns
     date_col = next((c for c in df.columns if 'date' in c.lower()), None)
@@ -111,7 +107,7 @@ def analyze_sales_data(filepath: str) -> dict:
                 "total_days": len(daily_sales)
             }
 
-    # Product-Category matrix (if both exist)
+    # Product-Category matrix
     if product_col and category_col and sales_col:
         product_category = df.groupby([product_col, category_col])[sales_col].sum().reset_index()
         analytics["product_category_breakdown"] = [
