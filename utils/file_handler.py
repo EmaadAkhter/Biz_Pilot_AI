@@ -14,21 +14,21 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ========== CONFIG ==========
-AZURE_STORAGE_URL = os.getenv("AZURE_STORAGE_URL")
+AZURE_ACCOUNT_NAME = os.getenv("AZURE_ACCOUNT_NAME")
 AZURE_SAS_TOKEN = os.getenv("AZURE_SAS_TOKEN")
-
+AZURE_SAS_URL =os.getenv("AZURE_STORAGE_URL")
 CONTAINER_NAME = "salesdata"
 MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 ALLOWED_EXTENSIONS = {'.csv', '.xlsx', '.xls'}
 
 # Validate required environment variables
-if not AZURE_STORAGE_URL:
+if not AZURE_ACCOUNT_NAME:
     raise RuntimeError("Missing required environment variable: AZURE_ACCOUNT_NAME")
 if not AZURE_SAS_TOKEN:
     raise RuntimeError("Missing required environment variable: AZURE_SAS_TOKEN")
 
 # Fix: Proper Azure Blob Service Client initialization
-account_url = f"{AZURE_STORAGE_URL}"
+account_url = f"{AZURE_STORAGE_URL}?{AZURE_SAS_TOKEN}"
 #sas_token = AZURE_SAS_TOKEN.lstrip('?')  # Remove leading ? if present
 
 try:
