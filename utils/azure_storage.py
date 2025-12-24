@@ -134,6 +134,25 @@ def delete_user_file(filename: str, user_id: str) -> dict:
     except Exception as e:
         raise HTTPException(500, f"Delete failed: {str(e)}")
 
+def health_check() -> dict:
+    """Check Azure Blob Storage connectivity"""
+    try:
+        container_client = get_container_client()
+        _ = container_client.exists()
+        
+        return {
+            "status": "healthy",
+            "storage": "connected",
+            "account": STORAGE_ACCOUNT_NAME,
+            "container": CONTAINER_NAME
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "storage": "disconnected",
+            "error": str(e)
+        }
+
 
 def get_file_path(filename: str, user_id: str = None) -> str:
     """
