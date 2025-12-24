@@ -16,32 +16,73 @@ logger = logging.getLogger(__name__)
 # ========== CONFIG ==========
 AZURE_ACCOUNT_NAME = os.getenv("AZURE_ACCOUNT_NAME")
 AZURE_SAS_TOKEN = os.getenv("AZURE_SAS_TOKEN")
-AZURE_SAS_URL =os.getenv("AZURE_STORAGE_URL")
+AZURE_STORAGE_URL = os.getenv("AZURE_STORAGE_URL")
 CONTAINER_NAME = "salesdata"
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+MAX_FILE_SIZE = int(os.getenv("MAX_FILE_SIZE", str(100 * 1024 * 1024)))  # 100MB default
+ROW_LIMIT = int(os.getenv("ROW_LIMIT", "1000000"))  # 1M rows default
 ALLOWED_EXTENSIONS = {'.csv', '.xlsx', '.xls'}
 
 # Validate required environment variables
-if not AZURE_ACCOUNT_NAME:
-    raise RuntimeError("Missing required environment variable: AZURE_ACCOUNT_NAME")
-if not AZURE_SAS_TOKEN:
-    raise RuntimeError("Missing required environment variable: AZURE_SAS_TOKEN")
+def validate_environment():
+    """Validate all required environment variables are present"""
+    required = {
+        "AZURE_ACCOUNT_NAME": AZURE_ACCOUNT_NAME,
+        "AZURE_SAS_TOKEN": AZURE_SAS_TOKEN,
+        "AZURE_STORAGE_URL": AZURE_STORAGE_URL
+    }
+    missing = [var for var, value in required.items() if not value]
+    if missing:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
-# Fix: Proper Azure Blob Service Client initialization
-account_url = AZURE_SAS_URL
-sas_token = AZURE_SAS_TOKEN  # Remove leading ? if present
+validate_environment()
 
+# Clean and prepare Azure configuration
+sas_token = AZURE_SAS_TOKEN.lstrip('?') if AZURE_SAS_TOKEN else None
+account_url = AZURE_STORAGE_URL.rstrip('/')
+
+# Ensure account_url doesn't include container name
+if account_url.endswith(f'/{CONTAINER_NAME}'):
+    account_url = account_url[:-len(f'/{CONTAINER_NAME}')]
+    logger.warning(f"Removed container name from AZURE_STORAGE_URL. Using: {account_url}")
+
+# Initialize Azure Blob Service Client
 try:
     blob_service_client = BlobServiceClient(
         account_url=account_url,
         credential=sas_token
     )
-    # Test connection on startup
-    blob_service_client.get_container_client(CONTAINER_NAME).exists()
-    logger.info(f"Successfully connected to Azure Blob Storage: {CONTAINER_NAME}")
+    
+    # Get container client and create if it doesn't exist
+    container_client = blob_service_client.get_container_client(CONTAINER_NAME)
+    
+    # Skip validation during build inspection if flag is set
+    skip_validation = os.getenv("SKIP_AZURE_VALIDATION", "false").lower() == "true"
+    
+    if not skip_validation:
+        try:
+            container_exists = container_client.exists()
+            if not container_exists:
+                logger.warning(f"Container '{CONTAINER_NAME}' does not exist. Attempting to create...")
+                try:
+                    container_client.create_container()
+                    logger.info(f"✓ Created container: {CONTAINER_NAME}")
+                except Exception as create_error:
+                    logger.error(f"Failed to create container: {str(create_error)}")
+                    logger.info("Container may already exist or you may lack permissions to create it")
+            else:
+                logger.info(f"✓ Successfully connected to Azure Blob Storage: {CONTAINER_NAME}")
+        except Exception as container_error:
+            logger.error(f"Container validation failed: {str(container_error)}")
+            raise
+    else:
+        logger.info("⚠ Skipping Azure validation (SKIP_AZURE_VALIDATION=true)")
+        
 except Exception as e:
-    logger.error(f"Failed to connect to Azure Blob Storage: {str(e)}")
-    raise RuntimeError(f"Azure Blob Storage connection failed: {str(e)}")
+    logger.error(f"Failed to initialize Azure Blob Storage: {str(e)}")
+    if os.getenv("SKIP_AZURE_VALIDATION", "false").lower() != "true":
+        raise RuntimeError(f"Azure Blob Storage connection failed: {str(e)}")
+    else:
+        logger.warning("⚠ Continuing despite Azure error (SKIP_AZURE_VALIDATION=true)")
 
 
 # ========== VALIDATION ==========
@@ -133,13 +174,13 @@ async def save_uploaded_file(file: UploadFile, user_id: str) -> dict:
             raise HTTPException(400, "File contains no data rows")
         if len(df.columns) == 0:
             raise HTTPException(400, "File contains no columns")
-        if len(df) > 1_000_000:
-            raise HTTPException(400, "File exceeds 1 million row limit")
+        if len(df) > ROW_LIMIT:
+            raise HTTPException(400, f"File exceeds {ROW_LIMIT:,} row limit")
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"File validation error for user {user_id}: {str(e)}")
-        raise HTTPException(400, "Invalid file format or corrupted file")
+        raise HTTPException(400, f"Invalid file format or corrupted file: {str(e)}")
 
     # Upload to Azure Blob Storage
     blob_name = generate_blob_name(user_id, file.filename)
@@ -154,7 +195,7 @@ async def save_uploaded_file(file: UploadFile, user_id: str) -> dict:
             "column_count": str(len(df.columns))
         }
         blob_client.upload_blob(content, overwrite=False, metadata=metadata)
-        logger.info(f"File uploaded successfully: {blob_name} for user {user_id}")
+        logger.info(f"✓ File uploaded: {blob_name} for user {user_id} ({len(df)} rows)")
     except ResourceExistsError:
         raise HTTPException(409, "File with this name already exists")
     except AzureError as e:
@@ -219,7 +260,7 @@ def delete_user_file(blob_name: str, user_id: str) -> dict:
         if not blob_client.exists():
             raise HTTPException(404, "File not found")
         blob_client.delete_blob()
-        logger.info(f"File deleted: {blob_name} by user {user_id}")
+        logger.info(f"✓ File deleted: {blob_name} by user {user_id}")
         return {"message": "File deleted successfully", "blob_name": blob_name}
     except HTTPException:
         raise
@@ -240,7 +281,7 @@ def get_blob_name_by_filename(original_filename: str, user_id: str) -> Optional[
         return None
     
     if len(matching) > 1:
-        logger.warning(f"Multiple files found with name '{original_filename}' for user {user_id}")
+        logger.warning(f"Multiple files found with name '{original_filename}' for user {user_id}. Returning most recent.")
         # Return the most recent one
         return matching[0]['blob_name']
     
@@ -251,8 +292,15 @@ def get_file_path(filename: str, user_id: str) -> str:
     """
     Get blob_name from either blob_name or original_filename.
     
-    SIMPLIFIED: Only accepts blob_name for precision.
-    If you only have the original filename, call get_blob_name_by_filename() first.
+    Args:
+        filename: Either a blob_name (user_id/uuid_filename.ext) or original filename
+        user_id: The user's ID for ownership verification
+    
+    Returns:
+        Valid blob_name
+    
+    Raises:
+        HTTPException: If file not found or access denied
     """
     # If it looks like a blob_name (has user_id prefix), verify and return
     if '/' in filename and filename.startswith(f"{user_id}/"):
@@ -262,7 +310,7 @@ def get_file_path(filename: str, user_id: str) -> str:
         blob_client = blob_service_client.get_blob_client(CONTAINER_NAME, filename)
         try:
             if not blob_client.exists():
-                raise HTTPException(404, "File not found")
+                raise HTTPException(404, f"File not found: {filename}")
         except AzureError as e:
             logger.error(f"Azure exists check error: {str(e)}")
             raise HTTPException(500, "Failed to verify file existence")
@@ -309,7 +357,7 @@ def load_dataframe(blob_name: str, user_id: str) -> pd.DataFrame:
         content = download_stream.readall()
         ext = get_file_extension(blob_name)
         df = _load_dataframe_from_bytes(content, ext)
-        logger.info(f"Loaded dataframe: {blob_name} ({len(df)} rows) for user {user_id}")
+        logger.info(f"✓ Loaded dataframe: {blob_name} ({len(df)} rows, {len(df.columns)} cols) for user {user_id}")
         return df
     except ResourceNotFoundError:
         raise HTTPException(404, "File not found")
@@ -320,7 +368,7 @@ def load_dataframe(blob_name: str, user_id: str) -> pd.DataFrame:
         raise HTTPException(500, "Failed to load file")
     except Exception as e:
         logger.error(f"Unexpected load error for user {user_id}: {str(e)}")
-        raise HTTPException(500, "Failed to load file")
+        raise HTTPException(500, f"Failed to load file: {str(e)}")
 
 
 def get_dataframe_preview(blob_name: str, user_id: str, num_rows: int = 10) -> dict:
@@ -350,3 +398,23 @@ def _extract_filename(blob_name: str) -> str:
         return parts[1] if len(parts) > 1 else filename_part
     except Exception:
         return blob_name
+
+
+# ========== HEALTH CHECK ==========
+def health_check() -> dict:
+    """Check Azure Blob Storage connection health"""
+    try:
+        container_client = blob_service_client.get_container_client(CONTAINER_NAME)
+        exists = container_client.exists()
+        return {
+            "status": "healthy",
+            "storage": "connected",
+            "container": CONTAINER_NAME,
+            "container_exists": exists
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "storage": "disconnected",
+            "error": str(e)
+        }
