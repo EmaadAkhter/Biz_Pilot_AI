@@ -1,11 +1,21 @@
 import pandas as pd
+import numpy as np
 from prophet import Prophet
+from io import BytesIO
+from utils.azure_storage import download_blob_to_bytes
 
 
-def forecast_demand(df: pd.DataFrame, periods: int = 30) -> dict:
-    """Forecast future sales using Facebook Prophet time series model"""
+def forecast_demand(blob_name: str, periods: int = 30) -> dict:
+    """Forecast future sales using Facebook Prophet time series model from Azure Blob Storage"""
+    # Download blob content
+    content = download_blob_to_bytes(blob_name)
+    
+    # Load dataframe based on file extension
+    if blob_name.endswith('.csv'):
+        df = pd.read_csv(BytesIO(content))
+    else:
+        df = pd.read_excel(BytesIO(content))
 
-    # Auto-detect columns
     date_col = next((c for c in df.columns if 'date' in c.lower()), None)
     sales_col = next((c for c in df.columns if 'sales' in c.lower() or 'amount' in c.lower() or 'revenue' in c.lower()),
                      None)
@@ -13,33 +23,27 @@ def forecast_demand(df: pd.DataFrame, periods: int = 30) -> dict:
     if not date_col or not sales_col:
         raise ValueError("Could not detect date or sales column")
 
-    # Prepare data
-    df_copy = df.copy()
-    df_copy[date_col] = pd.to_datetime(df_copy[date_col], errors='coerce')
-    df_copy = df_copy.dropna(subset=[date_col, sales_col])
+    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+    df = df.dropna(subset=[date_col, sales_col])
 
-    if len(df_copy) < 10:
-        raise ValueError("Not enough data points for forecasting (need at least 10)")
-
-    # Aggregate by date
-    prophet_df = df_copy.groupby(date_col)[sales_col].sum().reset_index()
+    prophet_df = df.groupby(date_col)[sales_col].sum().reset_index()
     prophet_df.columns = ['ds', 'y']
 
-    # Train model
+    if len(prophet_df) < 10:
+        raise ValueError("Not enough data points for forecasting (need at least 10)")
+
     model = Prophet(
         daily_seasonality=True if len(prophet_df) > 30 else False,
         weekly_seasonality=True if len(prophet_df) > 14 else False,
-        yearly_seasonality=False,
-        interval_width=0.95
+        yearly_seasonality=False
     )
     model.fit(prophet_df)
 
-    # Generate forecast
     future = model.make_future_dataframe(periods=periods)
     forecast = model.predict(future)
+
     future_forecast = forecast.tail(periods)
 
-    # Format forecast data
     forecast_data = []
     for _, row in future_forecast.iterrows():
         forecast_data.append({
@@ -49,26 +53,20 @@ def forecast_demand(df: pd.DataFrame, periods: int = 30) -> dict:
             "upper_bound": float(row['yhat_upper'])
         })
 
-    # Calculate trend
     avg_current = prophet_df['y'].tail(30).mean()
     avg_forecast = future_forecast['yhat'].mean()
-    trend_direction = "increasing" if avg_forecast > avg_current else "decreasing"
-    trend_percent = ((avg_forecast - avg_current) / avg_current * 100) if avg_current != 0 else 0
+    trend = "increasing" if avg_forecast > avg_current else "decreasing"
 
     insights = [
-        f"Forecast shows {trend_direction} trend over next {periods} days ({trend_percent:.1f}%)",
-        f"Expected average daily sales: ${avg_forecast:.2f}",
-        f"Current average: ${avg_current:.2f}"
+        f"Forecast shows {trend} trend over next {periods} days",
+        f"Expected average daily sales: {avg_forecast:.2f}",
+        f"Current average: {avg_current:.2f}"
     ]
 
     return {
         "forecast": forecast_data,
         "insights": insights,
-        "summary": {
-            "trend": trend_direction,
-            "trend_percent": round(trend_percent, 2),
-            "current_avg": round(avg_current, 2),
-            "forecast_avg": round(avg_forecast, 2),
+        "model_params": {
             "data_points_used": len(prophet_df),
             "forecast_periods": periods
         }
