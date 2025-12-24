@@ -1,10 +1,11 @@
 from fastmcp import FastMCP
 from dotenv import load_dotenv
 import logging
+import os
 
 from utils.analytics import analyze_sales_data
 from utils.forecast import forecast_demand
-from utils.file_handler import get_user_files, load_dataframe, get_file_path, health_check
+from utils.azure_storage import get_user_files, load_dataframe, get_file_path, health_check
 
 load_dotenv()
 
@@ -84,7 +85,7 @@ def analyze_sales_file(filename: str, user_id: str) -> dict:
         blob_name = get_file_path(filename, user_id)
         logger.info(f"Analyzing file {blob_name} for user {user_id}")
         
-        # Load the dataframe
+        # Load the dataframe - now with correct signature
         df = load_dataframe(blob_name, user_id)
         
         # Perform analytics
@@ -126,7 +127,7 @@ def query_sales_data(filename: str, user_id: str, question: str) -> dict:
         blob_name = get_file_path(filename, user_id)
         logger.info(f"Querying file {blob_name} for user {user_id}: {question}")
         
-        # Load the dataframe
+        # Load the dataframe - now with correct signature
         df = load_dataframe(blob_name, user_id)
         
         # Get full analytics
@@ -181,7 +182,7 @@ def forecast_sales_demand(filename: str, user_id: str, periods: int = 30) -> dic
         blob_name = get_file_path(filename, user_id)
         logger.info(f"Forecasting {periods} periods for file {blob_name} (user {user_id})")
         
-        # Load the dataframe
+        # Load the dataframe - now with correct signature
         df = load_dataframe(blob_name, user_id)
         
         # Generate forecast
