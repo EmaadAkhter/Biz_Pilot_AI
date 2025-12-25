@@ -65,7 +65,7 @@ def list_available_files(user_name: str) -> dict:
 
 
 @mcp.tool()
-def analyze_sales_file(filename: str, user_name: str) -> dict:
+def analyze_sales_file(filename: str, user_id: str) -> dict:
     """Analyze sales data from an uploaded file.
     Args:
         filename: Name or blob_name of the file to analyze
@@ -75,9 +75,7 @@ def analyze_sales_file(filename: str, user_name: str) -> dict:
     """
     try:
         # Get the actual blob name
-        id = get_user_id_by_name(user_name)
-        
-        blob_name = get_file_path(filename, id)
+        blob_name = get_file_path(filename, user_id)
         logger.info(f"Analyzing file {blob_name} for user {user_id}")
         
         # Load the dataframe - now with correct signature
@@ -102,7 +100,7 @@ def analyze_sales_file(filename: str, user_name: str) -> dict:
 
 
 @mcp.tool()
-def query_sales_data(filename: str, user_name: str, question: str) -> dict:
+def query_sales_data(filename: str, user_id: str, question: str) -> dict:
     """Answer specific questions about sales data.
     Args:
         filename: Name or blob_name of the file
@@ -114,8 +112,8 @@ def query_sales_data(filename: str, user_name: str, question: str) -> dict:
     """
     try:
         # Get the actual blob name
-        id = get_user_id_by_name(user_name)
-        blob_name = get_file_path(filename, id)
+        
+        blob_name = get_file_path(filename, user_id)
         logger.info(f"Querying file {blob_name} for user {user_id}: {question}")
         
         # Load the dataframe - now with correct signature
@@ -143,7 +141,7 @@ def query_sales_data(filename: str, user_name: str, question: str) -> dict:
 
 
 @mcp.tool()
-def forecast_sales_demand(filename: str, user_name: str, periods: int = 30) -> dict:
+def forecast_sales_demand(filename: str, user_id: str, periods: int = 30) -> dict:
     """Forecast future sales demand using Facebook Prophet time series analysis.
 
     Args:
@@ -163,8 +161,7 @@ def forecast_sales_demand(filename: str, user_name: str, periods: int = 30) -> d
             }
 
         # Get the actual blob name
-        id = get_user_id_by_name(user_name)
-        blob_name = get_file_path(filename, user_name)
+        blob_name = get_file_path(filename, user_id)
         logger.info(f"Forecasting {periods} periods for file {blob_name} (user {user_id})")
         
         # Load the dataframe - now with correct signature
