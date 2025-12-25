@@ -65,18 +65,9 @@ def list_available_files(user_id: str) -> dict:
 @mcp.tool()
 def analyze_sales_file(filename: str, user_id: str) -> dict:
     """Analyze sales data from an uploaded file.
-
-    Provides comprehensive analytics including:
-    - Total sales, averages, max/min values
-    - Top and bottom performing products
-    - Daily/weekly/monthly sales trends
-    - Sales breakdown by category and region
-    - Statistical summaries
-
     Args:
         filename: Name or blob_name of the file to analyze
         user_id: The user's ID
-
     Returns:
         Dictionary with comprehensive sales analytics
     """
@@ -86,7 +77,7 @@ def analyze_sales_file(filename: str, user_id: str) -> dict:
         logger.info(f"Analyzing file {blob_name} for user {user_id}")
         
         # Load the dataframe - now with correct signature
-        df = load_dataframe(blob_name, user_id)
+        df = load_dataframe(blob_name)
         
         # Perform analytics
         analytics = analyze_sales_data(df)
@@ -109,11 +100,6 @@ def analyze_sales_file(filename: str, user_id: str) -> dict:
 @mcp.tool()
 def query_sales_data(filename: str, user_id: str, question: str) -> dict:
     """Answer specific questions about sales data.
-
-    Use this tool when you need to answer specific questions about the data.
-    The tool will load the data and provide analytics that you can use to 
-    answer the user's question.
-
     Args:
         filename: Name or blob_name of the file
         user_id: The user's ID
@@ -128,7 +114,7 @@ def query_sales_data(filename: str, user_id: str, question: str) -> dict:
         logger.info(f"Querying file {blob_name} for user {user_id}: {question}")
         
         # Load the dataframe - now with correct signature
-        df = load_dataframe(blob_name, user_id)
+        df = load_dataframe(blob_name)
         
         # Get full analytics
         analytics = analyze_sales_data(df)
@@ -155,13 +141,6 @@ def query_sales_data(filename: str, user_id: str, question: str) -> dict:
 def forecast_sales_demand(filename: str, user_id: str, periods: int = 30) -> dict:
     """Forecast future sales demand using Facebook Prophet time series analysis.
 
-    This tool uses advanced time series forecasting to predict future sales
-    patterns based on historical data. It provides:
-    - Forecasted values for each future period
-    - Confidence intervals (upper/lower bounds)
-    - Trend analysis and seasonality detection
-    - Model performance metrics
-
     Args:
         filename: Name or blob_name of the file containing historical sales data
         user_id: The user's ID
@@ -183,7 +162,7 @@ def forecast_sales_demand(filename: str, user_id: str, periods: int = 30) -> dic
         logger.info(f"Forecasting {periods} periods for file {blob_name} (user {user_id})")
         
         # Load the dataframe - now with correct signature
-        df = load_dataframe(blob_name, user_id)
+        df = load_dataframe(blob_name)
         
         # Generate forecast
         result = forecast_demand(df, periods)
@@ -211,15 +190,6 @@ def conduct_market_research(
     depth_level: int = 2
 ) -> dict:
     """Conduct comprehensive market research analysis for a business idea.
-
-    This tool provides a structured framework for market research. Use web search
-    to fill in each research area with current, data-driven insights.
-
-    Research depth levels:
-    - Level 1 (Quick): Basic market overview, top competitors, SWOT
-    - Level 2 (Medium): Detailed competitive analysis, pain points, demand signals
-    - Level 3 (Deep): Full strategic analysis with Porter's Five Forces, 7P marketing mix
-
     Args:
         idea: Business idea or product description
         target_customer: Target customer segment (e.g., "SMBs in tech", "millennials")
