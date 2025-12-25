@@ -38,7 +38,7 @@ def check_system_health() -> dict:
 
 
 @mcp.tool()
-def list_available_files(user_name: str) -> dict:
+def list_available_files(user_id: str) -> dict:
     """List all available sales data files for a user.
 
     Args:
@@ -48,8 +48,7 @@ def list_available_files(user_name: str) -> dict:
         Dictionary with list of available files and metadata
     """
     try:
-        id = get_user_id_by_name(user_name)
-        files = get_user_files(id)
+        files = get_user_files(user_id)
         return {
             "status": "success",
             "total_files": len(files),
