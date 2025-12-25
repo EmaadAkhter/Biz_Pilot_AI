@@ -6,6 +6,7 @@ import os
 from utils.analytics import analyze_sales_data
 from utils.forecast import forecast_demand
 from utils.azure_storage import get_user_files, load_dataframe, get_file_path, health_check
+from utils.auth import get_user_id_by_name
 
 load_dotenv()
 
@@ -37,7 +38,7 @@ def check_system_health() -> dict:
 
 
 @mcp.tool()
-def list_available_files(user_id: str) -> dict:
+def list_available_files(user_name: str) -> dict:
     """List all available sales data files for a user.
 
     Args:
@@ -47,7 +48,8 @@ def list_available_files(user_id: str) -> dict:
         Dictionary with list of available files and metadata
     """
     try:
-        files = get_user_files(user_id)
+        id = get_user_id_by_name(user_name)
+        files = get_user_files(id)
         return {
             "status": "success",
             "total_files": len(files),
@@ -63,7 +65,7 @@ def list_available_files(user_id: str) -> dict:
 
 
 @mcp.tool()
-def analyze_sales_file(filename: str, user_id: str) -> dict:
+def analyze_sales_file(filename: str, user_name: str) -> dict:
     """Analyze sales data from an uploaded file.
     Args:
         filename: Name or blob_name of the file to analyze
@@ -73,7 +75,9 @@ def analyze_sales_file(filename: str, user_id: str) -> dict:
     """
     try:
         # Get the actual blob name
-        blob_name = get_file_path(filename, user_id)
+        id = get_user_id_by_name(user_name)
+        
+        blob_name = get_file_path(filename, id)
         logger.info(f"Analyzing file {blob_name} for user {user_id}")
         
         # Load the dataframe - now with correct signature
@@ -98,7 +102,7 @@ def analyze_sales_file(filename: str, user_id: str) -> dict:
 
 
 @mcp.tool()
-def query_sales_data(filename: str, user_id: str, question: str) -> dict:
+def query_sales_data(filename: str, user_name: str, question: str) -> dict:
     """Answer specific questions about sales data.
     Args:
         filename: Name or blob_name of the file
@@ -110,7 +114,8 @@ def query_sales_data(filename: str, user_id: str, question: str) -> dict:
     """
     try:
         # Get the actual blob name
-        blob_name = get_file_path(filename, user_id)
+        id = get_user_id_by_name(user_name)
+        blob_name = get_file_path(filename, id)
         logger.info(f"Querying file {blob_name} for user {user_id}: {question}")
         
         # Load the dataframe - now with correct signature
@@ -138,7 +143,7 @@ def query_sales_data(filename: str, user_id: str, question: str) -> dict:
 
 
 @mcp.tool()
-def forecast_sales_demand(filename: str, user_id: str, periods: int = 30) -> dict:
+def forecast_sales_demand(filename: str, user_name: str, periods: int = 30) -> dict:
     """Forecast future sales demand using Facebook Prophet time series analysis.
 
     Args:
@@ -158,7 +163,8 @@ def forecast_sales_demand(filename: str, user_id: str, periods: int = 30) -> dic
             }
 
         # Get the actual blob name
-        blob_name = get_file_path(filename, user_id)
+        id = get_user_id_by_name(user_name)
+        blob_name = get_file_path(filename, user_name)
         logger.info(f"Forecasting {periods} periods for file {blob_name} (user {user_id})")
         
         # Load the dataframe - now with correct signature
