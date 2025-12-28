@@ -109,15 +109,3 @@ def get_user_by_id(user_id: str) -> dict:
     user = response.data[0]
     del user["hashed_password"]
     return user
-
-
-def get_user_id_by_name(user_name:str)->str:
-    response=supabase.table("users").select("*").eq("full_name", user_name).execute()
-
-    if not response.data:
-        return None
-
-    user = response.data[0]
-    id = user["id"]
-    return id
-    

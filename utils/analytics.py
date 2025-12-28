@@ -1,18 +1,8 @@
 import pandas as pd
-from io import BytesIO
-from utils.azure_storage import download_blob_to_bytes
 
 
-def analyze_sales_data(blob_name: str) -> dict:
-    """Analyze sales data from Azure Blob Storage and return comprehensive statistics"""
-    # Download blob content
-    content = download_blob_to_bytes(blob_name)
-    
-    # Load dataframe based on file extension
-    if blob_name.endswith('.csv'):
-        df = pd.read_csv(BytesIO(content))
-    else:
-        df = pd.read_excel(BytesIO(content))
+def analyze_sales_data(df: pd.DataFrame) -> dict:
+    """Analyze sales data and return comprehensive statistics for visualization"""
 
     # Auto-detect columns
     date_col = next((c for c in df.columns if 'date' in c.lower()), None)
@@ -117,7 +107,7 @@ def analyze_sales_data(blob_name: str) -> dict:
                 "total_days": len(daily_sales)
             }
 
-    # Product-Category matrix (if both exist)
+    # Product-Category matrix
     if product_col and category_col and sales_col:
         product_category = df.groupby([product_col, category_col])[sales_col].sum().reset_index()
         analytics["product_category_breakdown"] = [
