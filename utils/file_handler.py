@@ -26,11 +26,11 @@ CONTAINER_NAME = "user-file-date"
 MAX_FILE_SIZE = 100 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'.csv', '.xlsx', '.xls'}
 
-# Build account URL from account name and SAS token
+# Build account URL - DO NOT include container name here
 if not AZURE_ACCOUNT_NAME or not AZURE_SAS_TOKEN:
     raise ValueError("Missing AZURE_ACCOUNT_NAME or AZURE_SAS_TOKEN in environment variables")
 
-account_url = f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net/{CONTAINER_NAME}?{AZURE_SAS_TOKEN}"
+account_url = f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net?{AZURE_SAS_TOKEN}"
 logger.info(f"Initializing Azure Blob Storage: {AZURE_ACCOUNT_NAME}")
 
 try:
