@@ -8,7 +8,7 @@ from fastapi import UploadFile, HTTPException
 import pandas as pd
 from azure.storage.blob import BlobServiceClient
 from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError
-from utils.redis_cache import(
+from redis_cache import (
     get_cached_file_list,
     cache_file_list,
     invalidate_file_list,
@@ -22,21 +22,88 @@ logger = logging.getLogger(__name__)
 # ========== CONFIG ==========
 AZURE_ACCOUNT_NAME = os.getenv("AZURE_ACCOUNT_NAME")
 AZURE_SAS_TOKEN = os.getenv("AZURE_SAS_TOKEN")
-CONTAINER_NAME = "user-file-date"
+AZURE_CONNECTION_STRING = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+CONTAINER_NAME = "salesdata"
 MAX_FILE_SIZE = 100 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'.csv', '.xlsx', '.xls'}
 
-# Build account URL from account name and SAS token
-if not AZURE_ACCOUNT_NAME or not AZURE_SAS_TOKEN:
-    raise ValueError("Missing AZURE_ACCOUNT_NAME or AZURE_SAS_TOKEN in environment variables")
-
-account_url = f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net/?{AZURE_SAS_TOKEN}"
-logger.info(f"Initializing Azure Blob Storage: {AZURE_ACCOUNT_NAME}")
+# Initialize BlobServiceClient with proper authentication
+blob_service_client = None
 
 try:
-    blob_service_client = BlobServiceClient(account_url=account_url)
+    # METHOD 1: Try connection string first (most reliable)
+    if AZURE_CONNECTION_STRING:
+        logger.info("Initializing Azure Blob Storage with connection string")
+        blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
+        logger.info("✅ Azure Blob Storage initialized with connection string")
+    
+    # METHOD 2: Try account name + SAS token
+    elif AZURE_ACCOUNT_NAME and AZURE_SAS_TOKEN:
+        logger.info(f"Initializing Azure Blob Storage with SAS token: {AZURE_ACCOUNT_NAME}")
+        
+        # Clean SAS token - remove leading '?' if present
+        sas_token = AZURE_SAS_TOKEN.strip()
+        if sas_token.startswith('?'):
+            sas_token = sas_token[1:]
+        
+        # Build proper account URL
+        account_url = f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net"
+        
+        # Initialize with SAS token
+        blob_service_client = BlobServiceClient(
+            account_url=account_url,
+            credential=sas_token
+        )
+        logger.info(f"✅ Azure Blob Storage initialized: {AZURE_ACCOUNT_NAME}")
+    
+    # METHOD 3: Try account key
+    elif AZURE_ACCOUNT_NAME and os.getenv("AZURE_ACCOUNT_KEY"):
+        logger.info(f"Initializing Azure Blob Storage with account key: {AZURE_ACCOUNT_NAME}")
+        account_key = os.getenv("AZURE_ACCOUNT_KEY")
+        account_url = f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net"
+        
+        blob_service_client = BlobServiceClient(
+            account_url=account_url,
+            credential=account_key
+        )
+        logger.info(f"✅ Azure Blob Storage initialized with account key")
+    
+    else:
+        raise ValueError(
+            "Missing Azure Storage credentials. Provide ONE of:\n"
+            "  1. AZURE_STORAGE_CONNECTION_STRING (recommended)\n"
+            "  2. AZURE_ACCOUNT_NAME + AZURE_ACCOUNT_KEY\n"
+            "  3. AZURE_ACCOUNT_NAME + AZURE_SAS_TOKEN"
+        )
+    
+    # Test connection by listing containers
+    if blob_service_client:
+        try:
+            # Try to access the container to verify credentials
+            container_client = blob_service_client.get_container_client(CONTAINER_NAME)
+            container_client.get_container_properties()
+            logger.info(f"✅ Verified access to container: {CONTAINER_NAME}")
+        except Exception as e:
+            logger.error(f"❌ Cannot access container '{CONTAINER_NAME}': {str(e)}")
+            logger.error("   Check: Container exists, credentials have proper permissions")
+            raise
+
 except Exception as e:
-    logger.error(f"Failed to initialize BlobServiceClient: {str(e)}")
+    logger.error(f"❌ Failed to initialize Azure Blob Storage: {str(e)}")
+    logger.error("")
+    logger.error("REQUIRED: Set ONE of these credential sets in Render Environment:")
+    logger.error("")
+    logger.error("Option 1 (RECOMMENDED):")
+    logger.error("  AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net")
+    logger.error("")
+    logger.error("Option 2:")
+    logger.error("  AZURE_ACCOUNT_NAME=yourstorageaccount")
+    logger.error("  AZURE_ACCOUNT_KEY=your_account_key_here")
+    logger.error("")
+    logger.error("Option 3:")
+    logger.error("  AZURE_ACCOUNT_NAME=yourstorageaccount")
+    logger.error("  AZURE_SAS_TOKEN=sv=2021-06-08&ss=bfqt&srt=sco&sp=rwdlacupiytfx...")
+    logger.error("")
     raise
 
 
@@ -78,6 +145,8 @@ def verify_ownership(blob_name: str, user_id: str) -> None:
 
 def get_container_client():
     """Get container client"""
+    if not blob_service_client:
+        raise HTTPException(500, "Azure Blob Storage not initialized")
     return blob_service_client.get_container_client(CONTAINER_NAME)
 
 
@@ -127,11 +196,11 @@ async def save_uploaded_file(file: UploadFile, user_id: str) -> dict:
             "columns": str(len(df.columns))
         }
         blob_client.upload_blob(content, overwrite=False, metadata=metadata)
-        logger.info(f"✓ File uploaded: {blob_name} by user {user_id}")
+        logger.info(f"✅ File uploaded: {blob_name} by user {user_id}")
 
         # Invalidate file list cache (new file added)
         invalidate_file_list(user_id)
-        logger.info(f"✓ File list cache invalidated for user {user_id}")
+        logger.info(f"✅ File list cache invalidated for user {user_id}")
 
     except ResourceExistsError:
         raise HTTPException(409, "File already exists")
@@ -165,7 +234,7 @@ def get_user_files(user_id: str, use_cache: bool = True) -> List[Dict]:
     if use_cache:
         cached = get_cached_file_list(user_id)
         if cached:
-            logger.info(f"✓ File list cache HIT for user {user_id}")
+            logger.info(f"✅ File list cache HIT for user {user_id}")
             return cached
         logger.info(f"○ File list cache MISS for user {user_id}")
 
@@ -194,14 +263,14 @@ def get_user_files(user_id: str, use_cache: bool = True) -> List[Dict]:
 
         # Sort by upload time (newest first)
         files.sort(key=lambda x: x['uploaded_at'] or '', reverse=True)
-        logger.info(f"✓ Listed {len(files)} files for user {user_id}")
+        logger.info(f"✅ Listed {len(files)} files for user {user_id}")
 
         # Cache the result
         if use_cache and files:
             if cache_file_list(user_id, files):
-                logger.info(f"✓ File list cached for user {user_id}")
+                logger.info(f"✅ File list cached for user {user_id}")
             else:
-                logger.warning(f"⚠ Failed to cache file list for user {user_id}")
+                logger.warning(f"⚠️  Failed to cache file list for user {user_id}")
 
         return files
 
@@ -230,13 +299,13 @@ def delete_user_file(blob_name: str, user_id: str) -> dict:
 
         # Delete from Azure
         blob_client.delete_blob()
-        logger.info(f"✓ File deleted: {blob_name} by user {user_id}")
+        logger.info(f"✅ File deleted: {blob_name} by user {user_id}")
 
         # Invalidate all related caches
         invalidate_file_list(user_id)
         invalidate_analytics(user_id, blob_name)
         invalidate_forecast(user_id, blob_name)
-        logger.info(f"✓ All caches invalidated for {blob_name}")
+        logger.info(f"✅ All caches invalidated for {blob_name}")
 
         return {
             "message": "File deleted successfully",
@@ -294,7 +363,7 @@ def get_file_metadata(blob_name: str, user_id: str, use_cache: bool = True) -> D
         if cached_files:
             matching = [f for f in cached_files if f['blob_name'] == blob_name]
             if matching:
-                logger.info(f"✓ File metadata from cache: {blob_name}")
+                logger.info(f"✅ File metadata from cache: {blob_name}")
                 return matching[0]
 
     # Fetch from Azure
@@ -312,7 +381,7 @@ def get_file_metadata(blob_name: str, user_id: str, use_cache: bool = True) -> D
             "content_type": props.content_settings.content_type if props.content_settings else None,
         }
 
-        logger.info(f"✓ File metadata fetched: {blob_name}")
+        logger.info(f"✅ File metadata fetched: {blob_name}")
         return metadata
 
     except ResourceNotFoundError:
@@ -361,7 +430,7 @@ def load_dataframe(blob_name: str, user_id: str) -> pd.DataFrame:
 
         # Load into DataFrame
         df = _load_dataframe_from_bytes(content, ext)
-        logger.info(f"✓ Loaded dataframe: {blob_name} ({len(df)} rows, {len(df.columns)} cols)")
+        logger.info(f"✅ Loaded dataframe: {blob_name} ({len(df)} rows, {len(df.columns)} cols)")
 
         return df
 
@@ -393,7 +462,7 @@ def get_dataframe_preview(blob_name: str, user_id: str, num_rows: int = 10,
     if use_cache:
         cached = cache.get(cache_key)
         if cached:
-            logger.info(f"✓ Preview cache HIT: {blob_name}")
+            logger.info(f"✅ Preview cache HIT: {blob_name}")
             return cached
 
     # Load and generate preview
@@ -415,7 +484,7 @@ def get_dataframe_preview(blob_name: str, user_id: str, num_rows: int = 10,
     # Cache preview for 5 minutes
     if use_cache:
         if cache.set(cache_key, preview, ttl=300):
-            logger.info(f"✓ Preview cached: {blob_name}")
+            logger.info(f"✅ Preview cached: {blob_name}")
 
     return preview
 
@@ -470,7 +539,7 @@ def clear_user_cache(user_id: str) -> dict:
     cleared["previews"] = cache.delete_pattern(f"preview:{user_id}:*")
 
     total = sum(cleared.values())
-    logger.info(f"✓ Cleared {total} cache entries for user {user_id}")
+    logger.info(f"✅ Cleared {total} cache entries for user {user_id}")
 
     return {
         "cleared": cleared,
