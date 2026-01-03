@@ -1,9 +1,35 @@
 import pandas as pd
+import logging
+from typing import Optional
 from prophet import Prophet
+from utils.redis_cache import get_cached_forecast, cache_forecast
+
+logger = logging.getLogger(__name__)
 
 
-def forecast_demand(df: pd.DataFrame, periods: int = 30) -> dict:
-    """Forecast future sales using Facebook Prophet time series model"""
+def forecast_demand(df: pd.DataFrame, periods: int = 30, user_id: str = None,
+                    blob_name: str = None, use_cache: bool = True) -> dict:
+    """Forecast future sales using Facebook Prophet time series model
+
+    Args:
+        df: DataFrame to forecast
+        periods: Number of days to forecast (1-365)
+        user_id: User ID for caching
+        blob_name: File identifier for caching
+        use_cache: Whether to use Redis cache
+
+    Returns:
+        Dictionary with forecast data and insights
+    """
+
+    # Try to get from cache if enabled
+    if use_cache and user_id and blob_name:
+        cached = get_cached_forecast(user_id, blob_name, periods)
+        if cached:
+            logger.info(f"✓ Forecast cache hit for {blob_name} (periods={periods})")
+            return cached
+
+    logger.info(f"Computing forecast for {blob_name or 'dataframe'} (periods={periods})")
 
     # Auto-detect columns
     date_col = next((c for c in df.columns if 'date' in c.lower()), None)
@@ -61,7 +87,7 @@ def forecast_demand(df: pd.DataFrame, periods: int = 30) -> dict:
         f"Current average: ${avg_current:.2f}"
     ]
 
-    return {
+    result = {
         "forecast": forecast_data,
         "insights": insights,
         "summary": {
@@ -73,3 +99,12 @@ def forecast_demand(df: pd.DataFrame, periods: int = 30) -> dict:
             "forecast_periods": periods
         }
     }
+
+    # Cache the results if enabled
+    if use_cache and user_id and blob_name:
+        if cache_forecast(user_id, blob_name, periods, result):
+            logger.info(f"✓ Forecast cached for {blob_name} (periods={periods})")
+        else:
+            logger.warning(f"Failed to cache forecast for {blob_name}")
+
+    return result

@@ -1,8 +1,30 @@
 import pandas as pd
+import logging
+from typing import Optional
+from utils.redis_cache import get_cached_analytics, cache_analytics
+
+logger = logging.getLogger(__name__)
 
 
-def analyze_sales_data(df: pd.DataFrame) -> dict:
-    """Analyze sales data and return comprehensive statistics for visualization"""
+def analyze_sales_data(df: pd.DataFrame, user_id: str = None, blob_name: str = None,
+                       use_cache: bool = True) -> dict:
+    """Analyze sales data and return comprehensive statistics for visualization
+
+    Args:
+        df: DataFrame to analyze
+        user_id: User ID for caching
+        blob_name: File identifier for caching
+        use_cache: Whether to use Redis cache
+    """
+
+    # Try to get from cache if enabled
+    if use_cache and user_id and blob_name:
+        cached = get_cached_analytics(user_id, blob_name)
+        if cached:
+            logger.info(f"✓ Analytics cache hit for {blob_name}")
+            return cached
+
+    logger.info(f"Computing analytics for {blob_name or 'dataframe'}")
 
     # Auto-detect columns
     date_col = next((c for c in df.columns if 'date' in c.lower()), None)
@@ -118,5 +140,12 @@ def analyze_sales_data(df: pd.DataFrame) -> dict:
             }
             for _, row in product_category.iterrows()
         ]
+
+    # Cache the results if enabled
+    if use_cache and user_id and blob_name:
+        if cache_analytics(user_id, blob_name, analytics):
+            logger.info(f"✓ Analytics cached for {blob_name}")
+        else:
+            logger.warning(f"Failed to cache analytics for {blob_name}")
 
     return analytics

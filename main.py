@@ -17,12 +17,16 @@ from utils.file_handler import (
     delete_user_file,
     get_file_path,
     load_dataframe,
-    validate_filename
+    validate_filename,
+    get_dataframe_preview,
+    clear_user_cache,
+    get_cache_stats
 )
 from utils.analytics import analyze_sales_data
 from utils.forecast import forecast_demand
 from utils.llm import call_llm_simple, call_llm_with_functions
 from utils.research import do_market_research_cached, SearchManager
+from utils.redis_cache import cache, track_api_usage, get_api_usage
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -41,10 +45,17 @@ app.add_middleware(
 # Initialize search manager for research (shared instance)
 try:
     search_manager = SearchManager()
-    logger.info("Search manager initialized successfully")
+    logger.info("✓ Search manager initialized successfully")
 except ValueError as e:
     logger.warning(f"Search manager initialization failed: {str(e)}. Market research will be unavailable.")
     search_manager = None
+
+# Log Redis status
+if cache.enabled:
+    stats = cache.get_stats()
+    logger.info(f"✓ Redis cache enabled: {stats.get('status')}")
+else:
+    logger.warning("⚠ Redis cache disabled - running without cache")
 
 
 class UserSignup(BaseModel):
@@ -134,11 +145,20 @@ async def get_current_user_optional(authorization: Optional[str] = Header(None))
         return None
 
 
+def check_rate_limit(user_id: str, endpoint: str, limit: int = 100) -> None:
+    """Check rate limit for endpoint"""
+    usage = track_api_usage(user_id, endpoint)
+    if usage and usage > limit:
+        logger.warning(f"Rate limit exceeded for {user_id} on {endpoint}: {usage}/{limit}")
+        raise HTTPException(429, f"Rate limit exceeded. Max {limit} requests per hour.")
+
+
 def execute_function(function_name: str, arguments: dict) -> dict:
     """Execute business logic functions called by LLM"""
     try:
+        user_id = arguments.get("user_id")
+
         if function_name == "list_available_files":
-            user_id = arguments["user_id"]
             files = get_user_files(user_id)
             return {
                 "status": "success",
@@ -148,23 +168,25 @@ def execute_function(function_name: str, arguments: dict) -> dict:
 
         elif function_name == "analyze_sales_file":
             filename = arguments["filename"]
-            user_id = arguments["user_id"]
 
             validate_filename(filename)
             blob_name = get_file_path(filename, user_id)
             df = load_dataframe(blob_name, user_id)
-            analytics = analyze_sales_data(df)
+
+            # Pass user_id and blob_name for caching
+            analytics = analyze_sales_data(df, user_id=user_id, blob_name=blob_name)
             return analytics
 
         elif function_name == "query_sales_data":
             filename = arguments["filename"]
-            user_id = arguments["user_id"]
             question = arguments["question"]
 
             validate_filename(filename)
             blob_name = get_file_path(filename, user_id)
             df = load_dataframe(blob_name, user_id)
-            analytics = analyze_sales_data(df)
+
+            # Use cached analytics if available
+            analytics = analyze_sales_data(df, user_id=user_id, blob_name=blob_name)
 
             return {
                 "question": question,
@@ -174,7 +196,6 @@ def execute_function(function_name: str, arguments: dict) -> dict:
 
         elif function_name == "forecast_sales_demand":
             filename = arguments["filename"]
-            user_id = arguments["user_id"]
             periods = arguments.get("periods", 30)
 
             if periods < 1 or periods > 365:
@@ -183,7 +204,9 @@ def execute_function(function_name: str, arguments: dict) -> dict:
             validate_filename(filename)
             blob_name = get_file_path(filename, user_id)
             df = load_dataframe(blob_name, user_id)
-            result = forecast_demand(df, periods)
+
+            # Pass user_id and blob_name for caching
+            result = forecast_demand(df, periods=periods, user_id=user_id, blob_name=blob_name)
             return result
 
         elif function_name == "market_research":
@@ -209,7 +232,7 @@ def execute_function(function_name: str, arguments: dict) -> dict:
                     idea=idea,
                     customer=customer,
                     geography=geography,
-                    level=min(level, 3),  # Cap at level 3
+                    level=min(level, 3),
                     search_manager=search_manager,
                     cache_dir="./cache",
                     cache_expiry_hours=24
@@ -242,7 +265,23 @@ def execute_function(function_name: str, arguments: dict) -> dict:
 @app.get("/")
 def root():
     """Health check"""
-    return {"message": "BizPilot AI Backend"}
+    redis_status = "enabled" if cache.enabled else "disabled"
+    return {
+        "message": "BizPilot AI Backend",
+        "status": "running",
+        "cache": redis_status
+    }
+
+
+@app.get("/health")
+def health_check():
+    """Detailed health check"""
+    health = {
+        "status": "healthy",
+        "redis": cache.get_stats() if cache.enabled else {"enabled": False},
+        "search_api": "available" if search_manager else "unavailable"
+    }
+    return health
 
 
 @app.post("/signup")
@@ -303,9 +342,14 @@ async def upload_sales(
 ):
     """Upload sales data file"""
     try:
+        # Rate limit: 20 uploads per hour
+        check_rate_limit(current_user["id"], "upload", limit=20)
+
         result = await save_uploaded_file(file, current_user["id"])
         logger.info(f"File uploaded by {current_user['id']}: {file.filename}")
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Upload error for {current_user['id']}: {str(e)}")
         raise
@@ -313,12 +357,32 @@ async def upload_sales(
 
 @app.get("/files")
 def list_files(current_user: dict = Depends(get_current_user)):
-    """List all user files"""
+    """List all user files (cached)"""
     try:
         files = get_user_files(current_user["id"])
-        return {"files": files}
+        return {
+            "files": files,
+            "total": len(files)
+        }
     except Exception as e:
         logger.error(f"List files error for {current_user['id']}: {str(e)}")
+        raise
+
+
+@app.get("/files/{filename}/preview")
+def preview_file(
+        filename: str,
+        current_user: dict = Depends(get_current_user),
+        rows: int = 10
+):
+    """Get file preview (cached)"""
+    try:
+        validate_filename(filename)
+        blob_name = get_file_path(filename, current_user["id"])
+        preview = get_dataframe_preview(blob_name, current_user["id"], num_rows=rows)
+        return preview
+    except Exception as e:
+        logger.error(f"Preview error for {current_user['id']}: {str(e)}")
         raise
 
 
@@ -327,7 +391,7 @@ def delete_file(
         filename: str,
         current_user: dict = Depends(get_current_user)
 ):
-    """Delete a file"""
+    """Delete a file (clears all related caches)"""
     try:
         validate_filename(filename)
         blob_name = get_file_path(filename, current_user["id"])
@@ -344,14 +408,22 @@ def get_analytics(
         filename: str,
         current_user: dict = Depends(get_current_user)
 ):
-    """Get analytics for a file"""
+    """Get analytics for a file (cached for 30 min)"""
     try:
+        # Rate limit: 100 analytics per hour
+        check_rate_limit(current_user["id"], "analytics", limit=100)
+
         validate_filename(filename)
         blob_name = get_file_path(filename, current_user["id"])
         df = load_dataframe(blob_name, current_user["id"])
-        analytics = analyze_sales_data(df)
+
+        # Analytics will be cached automatically
+        analytics = analyze_sales_data(df, user_id=current_user["id"], blob_name=blob_name)
+
         logger.info(f"Analytics generated for {current_user['id']}: {filename}")
         return analytics
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Analytics error for {current_user['id']}: {str(e)}")
         raise
@@ -362,14 +434,27 @@ def get_forecast(
         request: ForecastRequest,
         current_user: dict = Depends(get_current_user)
 ):
-    """Generate demand forecast for a file"""
+    """Generate demand forecast for a file (cached for 1 hour)"""
     try:
+        # Rate limit: 50 forecasts per hour
+        check_rate_limit(current_user["id"], "forecast", limit=50)
+
         validate_filename(request.filename)
         blob_name = get_file_path(request.filename, current_user["id"])
         df = load_dataframe(blob_name, current_user["id"])
-        forecast = forecast_demand(df, periods=request.periods)
+
+        # Forecast will be cached automatically
+        forecast = forecast_demand(
+            df,
+            periods=request.periods,
+            user_id=current_user["id"],
+            blob_name=blob_name
+        )
+
         logger.info(f"Forecast generated for {current_user['id']}: {request.filename}")
         return forecast
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Forecast error for {current_user['id']}: {str(e)}")
         raise
@@ -383,6 +468,11 @@ def llm_chat(
     """Simple chat with LLM (no function calling, authentication optional)"""
     try:
         user_id = current_user["id"] if current_user else "anonymous"
+
+        # Rate limit for authenticated users
+        if current_user:
+            check_rate_limit(user_id, "llm_chat", limit=100)
+
         response = call_llm_simple(
             prompt=request.prompt,
             model=request.model,
@@ -390,6 +480,8 @@ def llm_chat(
         )
         logger.info(f"LLM chat for {user_id} (reasoning: {request.use_reasoning})")
         return {"response": response}
+    except HTTPException:
+        raise
     except Exception as e:
         user_id = current_user["id"] if current_user else "anonymous"
         logger.error(f"LLM error for {user_id}: {str(e)}")
@@ -404,6 +496,9 @@ def general_assistant(
     """General business assistant with access to all your data, analytics, and research functions"""
     try:
         user_id = current_user["id"]
+
+        # Rate limit: 50 assistant calls per hour
+        check_rate_limit(user_id, "assistant", limit=50)
 
         # Get list of user's files
         user_files = get_user_files(user_id)
@@ -452,6 +547,8 @@ Instructions:
             "response": result["response"],
             "reasoning_details": result.get("reasoning_details")
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"General assistant error for {current_user['id']}: {str(e)}")
         raise HTTPException(500, f"Assistant call failed: {str(e)}")
@@ -465,6 +562,48 @@ def get_research_usage():
 
     stats = search_manager.get_usage_stats()
     return {"status": "available", "usage": stats}
+
+
+# ========== CACHE MANAGEMENT ROUTES ==========
+@app.get("/cache/stats")
+def cache_stats(current_user: dict = Depends(get_current_user)):
+    """Get cache statistics for current user"""
+    try:
+        stats = get_cache_stats(user_id=current_user["id"])
+        return stats
+    except Exception as e:
+        logger.error(f"Cache stats error: {str(e)}")
+        raise HTTPException(500, "Failed to get cache stats")
+
+
+@app.post("/cache/clear")
+def clear_cache(current_user: dict = Depends(get_current_user)):
+    """Clear all cached data for current user"""
+    try:
+        result = clear_user_cache(current_user["id"])
+        logger.info(f"Cache cleared for {current_user['id']}: {result['total']} items")
+        return result
+    except Exception as e:
+        logger.error(f"Cache clear error: {str(e)}")
+        raise HTTPException(500, "Failed to clear cache")
+
+
+@app.get("/usage/{endpoint}")
+def get_usage(
+        endpoint: str,
+        current_user: dict = Depends(get_current_user)
+):
+    """Get API usage for specific endpoint"""
+    try:
+        usage = get_api_usage(current_user["id"], endpoint)
+        return {
+            "endpoint": endpoint,
+            "usage": usage,
+            "period": "last hour"
+        }
+    except Exception as e:
+        logger.error(f"Usage stats error: {str(e)}")
+        raise HTTPException(500, "Failed to get usage stats")
 
 
 if __name__ == "__main__":

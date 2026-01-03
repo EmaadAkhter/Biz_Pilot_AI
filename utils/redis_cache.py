@@ -1,0 +1,304 @@
+import os
+import json
+import logging
+import hashlib
+from typing import Optional, Any, Dict
+from datetime import timedelta
+import redis
+from dotenv import load_dotenv
+
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+# ========== CONFIG ==========
+REDIS_HOST = os.getenv("AZURE_REDIS_HOST")
+REDIS_PORT = int(os.getenv("AZURE_REDIS_PORT", "6380"))
+REDIS_PASSWORD = os.getenv("AZURE_REDIS_PASSWORD")
+REDIS_SSL = os.getenv("AZURE_REDIS_SSL", "true").lower() == "true"
+
+# Default TTL values (in seconds)
+DEFAULT_TTL = 3600  # 1 hour
+ANALYTICS_TTL = 1800  # 30 minutes
+FILE_LIST_TTL = 300  # 5 minutes
+USER_TTL = 7200  # 2 hours
+FORECAST_TTL = 3600  # 1 hour
+
+if not REDIS_HOST or not REDIS_PASSWORD:
+    logger.warning("Redis credentials not found. Cache will be disabled.")
+    REDIS_ENABLED = False
+else:
+    REDIS_ENABLED = True
+
+
+class RedisCache:
+    """Azure Redis Cache manager with automatic fallback"""
+
+    def __init__(self):
+        self.client = None
+        self.enabled = REDIS_ENABLED
+
+        if self.enabled:
+            try:
+                self.client = redis.Redis(
+                    host=REDIS_HOST,
+                    port=REDIS_PORT,
+                    password=REDIS_PASSWORD,
+                    ssl=REDIS_SSL,
+                    ssl_cert_reqs=None,
+                    decode_responses=True,
+                    socket_connect_timeout=5,
+                    socket_timeout=5,
+                    retry_on_timeout=True,
+                    health_check_interval=30
+                )
+                # Test connection
+                self.client.ping()
+                logger.info(f"✓ Redis connected: {REDIS_HOST}")
+            except Exception as e:
+                logger.error(f"Redis connection failed: {str(e)}")
+                self.enabled = False
+                self.client = None
+
+    def _generate_key(self, prefix: str, *args) -> str:
+        """Generate cache key from prefix and arguments"""
+        key_parts = [prefix] + [str(arg) for arg in args]
+        key_string = ":".join(key_parts)
+        return key_string
+
+    def get(self, key: str) -> Optional[Any]:
+        """Get value from cache"""
+        if not self.enabled or not self.client:
+            return None
+
+        try:
+            value = self.client.get(key)
+            if value:
+                logger.debug(f"Cache HIT: {key}")
+                return json.loads(value)
+            logger.debug(f"Cache MISS: {key}")
+            return None
+        except Exception as e:
+            logger.error(f"Redis GET error for {key}: {str(e)}")
+            return None
+
+    def set(self, key: str, value: Any, ttl: int = DEFAULT_TTL) -> bool:
+        """Set value in cache with TTL"""
+        if not self.enabled or not self.client:
+            return False
+
+        try:
+            serialized = json.dumps(value)
+            self.client.setex(key, ttl, serialized)
+            logger.debug(f"Cache SET: {key} (TTL: {ttl}s)")
+            return True
+        except Exception as e:
+            logger.error(f"Redis SET error for {key}: {str(e)}")
+            return False
+
+    def delete(self, key: str) -> bool:
+        """Delete key from cache"""
+        if not self.enabled or not self.client:
+            return False
+
+        try:
+            self.client.delete(key)
+            logger.debug(f"Cache DELETE: {key}")
+            return True
+        except Exception as e:
+            logger.error(f"Redis DELETE error for {key}: {str(e)}")
+            return False
+
+    def delete_pattern(self, pattern: str) -> int:
+        """Delete all keys matching pattern"""
+        if not self.enabled or not self.client:
+            return 0
+
+        try:
+            keys = self.client.keys(pattern)
+            if keys:
+                count = self.client.delete(*keys)
+                logger.debug(f"Cache DELETE pattern {pattern}: {count} keys")
+                return count
+            return 0
+        except Exception as e:
+            logger.error(f"Redis DELETE pattern error for {pattern}: {str(e)}")
+            return 0
+
+    def exists(self, key: str) -> bool:
+        """Check if key exists"""
+        if not self.enabled or not self.client:
+            return False
+
+        try:
+            return self.client.exists(key) > 0
+        except Exception as e:
+            logger.error(f"Redis EXISTS error for {key}: {str(e)}")
+            return False
+
+    def get_ttl(self, key: str) -> Optional[int]:
+        """Get remaining TTL for key"""
+        if not self.enabled or not self.client:
+            return None
+
+        try:
+            ttl = self.client.ttl(key)
+            return ttl if ttl > 0 else None
+        except Exception as e:
+            logger.error(f"Redis TTL error for {key}: {str(e)}")
+            return None
+
+    def increment(self, key: str, amount: int = 1, ttl: int = DEFAULT_TTL) -> Optional[int]:
+        """Increment counter"""
+        if not self.enabled or not self.client:
+            return None
+
+        try:
+            value = self.client.incr(key, amount)
+            # Set TTL if key is new
+            if value == amount:
+                self.client.expire(key, ttl)
+            return value
+        except Exception as e:
+            logger.error(f"Redis INCR error for {key}: {str(e)}")
+            return None
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get Redis cache statistics"""
+        if not self.enabled or not self.client:
+            return {"enabled": False, "status": "disabled"}
+
+        try:
+            info = self.client.info()
+            return {
+                "enabled": True,
+                "status": "connected",
+                "used_memory_mb": round(info.get("used_memory", 0) / (1024 * 1024), 2),
+                "connected_clients": info.get("connected_clients", 0),
+                "total_commands_processed": info.get("total_commands_processed", 0),
+                "keyspace_hits": info.get("keyspace_hits", 0),
+                "keyspace_misses": info.get("keyspace_misses", 0),
+                "hit_rate": self._calculate_hit_rate(
+                    info.get("keyspace_hits", 0),
+                    info.get("keyspace_misses", 0)
+                ),
+                "uptime_seconds": info.get("uptime_in_seconds", 0)
+            }
+        except Exception as e:
+            logger.error(f"Redis stats error: {str(e)}")
+            return {"enabled": True, "status": "error", "error": str(e)}
+
+    def _calculate_hit_rate(self, hits: int, misses: int) -> float:
+        """Calculate cache hit rate percentage"""
+        total = hits + misses
+        return round((hits / total * 100) if total > 0 else 0, 2)
+
+    def flush_all(self) -> bool:
+        """Clear entire cache (use with caution!)"""
+        if not self.enabled or not self.client:
+            return False
+
+        try:
+            self.client.flushdb()
+            logger.warning("Cache FLUSHED: All keys deleted")
+            return True
+        except Exception as e:
+            logger.error(f"Redis FLUSH error: {str(e)}")
+            return False
+
+
+# ========== GLOBAL INSTANCE ==========
+cache = RedisCache()
+
+
+# ========== HELPER FUNCTIONS ==========
+
+def cache_analytics(user_id: str, blob_name: str, analytics_data: Dict) -> bool:
+    """Cache analytics results"""
+    key = cache._generate_key("analytics", user_id, blob_name)
+    return cache.set(key, analytics_data, ttl=ANALYTICS_TTL)
+
+
+def get_cached_analytics(user_id: str, blob_name: str) -> Optional[Dict]:
+    """Get cached analytics results"""
+    key = cache._generate_key("analytics", user_id, blob_name)
+    return cache.get(key)
+
+
+def invalidate_analytics(user_id: str, blob_name: str = None) -> int:
+    """Invalidate analytics cache for user or specific file"""
+    if blob_name:
+        key = cache._generate_key("analytics", user_id, blob_name)
+        return 1 if cache.delete(key) else 0
+    else:
+        pattern = cache._generate_key("analytics", user_id, "*")
+        return cache.delete_pattern(pattern)
+
+
+def cache_file_list(user_id: str, file_list: list) -> bool:
+    """Cache user's file list"""
+    key = cache._generate_key("files", user_id)
+    return cache.set(key, file_list, ttl=FILE_LIST_TTL)
+
+
+def get_cached_file_list(user_id: str) -> Optional[list]:
+    """Get cached file list"""
+    key = cache._generate_key("files", user_id)
+    return cache.get(key)
+
+
+def invalidate_file_list(user_id: str) -> bool:
+    """Invalidate file list cache"""
+    key = cache._generate_key("files", user_id)
+    return cache.delete(key)
+
+
+def cache_forecast(user_id: str, blob_name: str, periods: int, forecast_data: Dict) -> bool:
+    """Cache forecast results"""
+    key = cache._generate_key("forecast", user_id, blob_name, periods)
+    return cache.set(key, forecast_data, ttl=FORECAST_TTL)
+
+
+def get_cached_forecast(user_id: str, blob_name: str, periods: int) -> Optional[Dict]:
+    """Get cached forecast results"""
+    key = cache._generate_key("forecast", user_id, blob_name, periods)
+    return cache.get(key)
+
+
+def invalidate_forecast(user_id: str, blob_name: str = None) -> int:
+    """Invalidate forecast cache"""
+    if blob_name:
+        pattern = cache._generate_key("forecast", user_id, blob_name, "*")
+    else:
+        pattern = cache._generate_key("forecast", user_id, "*")
+    return cache.delete_pattern(pattern)
+
+
+def cache_user(user_id: str, user_data: Dict) -> bool:
+    """Cache user data"""
+    key = cache._generate_key("user", user_id)
+    return cache.set(key, user_data, ttl=USER_TTL)
+
+
+def get_cached_user(user_id: str) -> Optional[Dict]:
+    """Get cached user data"""
+    key = cache._generate_key("user", user_id)
+    return cache.get(key)
+
+
+def invalidate_user(user_id: str) -> bool:
+    """Invalidate user cache"""
+    key = cache._generate_key("user", user_id)
+    return cache.delete(key)
+
+
+def track_api_usage(user_id: str, endpoint: str) -> Optional[int]:
+    """Track API usage with rate limiting"""
+    key = cache._generate_key("api_usage", user_id, endpoint)
+    return cache.increment(key, ttl=3600)  # Reset hourly
+
+
+def get_api_usage(user_id: str, endpoint: str) -> int:
+    """Get current API usage count"""
+    key = cache._generate_key("api_usage", user_id, endpoint)
+    value = cache.get(key)
+    return int(value) if value else 0
