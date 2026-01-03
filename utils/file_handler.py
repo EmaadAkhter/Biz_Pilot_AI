@@ -8,7 +8,7 @@ from fastapi import UploadFile, HTTPException
 import pandas as pd
 from azure.storage.blob import BlobServiceClient
 from azure.core.exceptions import ResourceNotFoundError, ResourceExistsError
-from utils.redis_cache import (
+from redis_cache import (
     get_cached_file_list,
     cache_file_list,
     invalidate_file_list,
@@ -29,15 +29,37 @@ ALLOWED_EXTENSIONS = {'.csv', '.xlsx', '.xls'}
 
 # Initialize BlobServiceClient with proper authentication
 blob_service_client = None
+AZURE_INIT_ERROR = None
 
 try:
-    # METHOD 1: Try connection string first (most reliable)
+    # Validate connection string format if provided
     if AZURE_CONNECTION_STRING:
+        conn_str = AZURE_CONNECTION_STRING.strip()
+        
+        # Check if it's actually a connection string (has required keys)
+        if 'AccountName' not in conn_str and 'accountname' not in conn_str.lower():
+            raise ValueError(
+                f"AZURE_STORAGE_CONNECTION_STRING is malformed. It should contain 'AccountName=...'\n"
+                f"Current value starts with: {conn_str[:50]}..."
+            )
+        
         logger.info("Initializing Azure Blob Storage with connection string")
-        blob_service_client = BlobServiceClient.from_connection_string(AZURE_CONNECTION_STRING)
+        blob_service_client = BlobServiceClient.from_connection_string(conn_str)
         logger.info("✅ Azure Blob Storage initialized with connection string")
     
-    # METHOD 2: Try account name + SAS token
+    # METHOD 2: Try account name + account key
+    elif AZURE_ACCOUNT_NAME and os.getenv("AZURE_ACCOUNT_KEY"):
+        logger.info(f"Initializing Azure Blob Storage with account key: {AZURE_ACCOUNT_NAME}")
+        account_key = os.getenv("AZURE_ACCOUNT_KEY")
+        account_url = f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net"
+        
+        blob_service_client = BlobServiceClient(
+            account_url=account_url,
+            credential=account_key
+        )
+        logger.info(f"✅ Azure Blob Storage initialized with account key")
+    
+    # METHOD 3: Try account name + SAS token
     elif AZURE_ACCOUNT_NAME and AZURE_SAS_TOKEN:
         logger.info(f"Initializing Azure Blob Storage with SAS token: {AZURE_ACCOUNT_NAME}")
         
@@ -56,25 +78,19 @@ try:
         )
         logger.info(f"✅ Azure Blob Storage initialized: {AZURE_ACCOUNT_NAME}")
     
-    # METHOD 3: Try account key
-    elif AZURE_ACCOUNT_NAME and os.getenv("AZURE_ACCOUNT_KEY"):
-        logger.info(f"Initializing Azure Blob Storage with account key: {AZURE_ACCOUNT_NAME}")
-        account_key = os.getenv("AZURE_ACCOUNT_KEY")
-        account_url = f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net"
-        
-        blob_service_client = BlobServiceClient(
-            account_url=account_url,
-            credential=account_key
-        )
-        logger.info(f"✅ Azure Blob Storage initialized with account key")
-    
     else:
-        raise ValueError(
-            "Missing Azure Storage credentials. Provide ONE of:\n"
+        error_msg = (
+            "Missing Azure Storage credentials. Current environment:\n"
+            f"  AZURE_STORAGE_CONNECTION_STRING: {'SET (length: {})'.format(len(AZURE_CONNECTION_STRING)) if AZURE_CONNECTION_STRING else 'NOT SET'}\n"
+            f"  AZURE_ACCOUNT_NAME: {AZURE_ACCOUNT_NAME or 'NOT SET'}\n"
+            f"  AZURE_ACCOUNT_KEY: {'SET' if os.getenv('AZURE_ACCOUNT_KEY') else 'NOT SET'}\n"
+            f"  AZURE_SAS_TOKEN: {'SET (length: {})'.format(len(AZURE_SAS_TOKEN)) if AZURE_SAS_TOKEN else 'NOT SET'}\n"
+            "\nProvide ONE of:\n"
             "  1. AZURE_STORAGE_CONNECTION_STRING (recommended)\n"
             "  2. AZURE_ACCOUNT_NAME + AZURE_ACCOUNT_KEY\n"
             "  3. AZURE_ACCOUNT_NAME + AZURE_SAS_TOKEN"
         )
+        raise ValueError(error_msg)
     
     # Test connection by listing containers
     if blob_service_client:
@@ -89,22 +105,37 @@ try:
             raise
 
 except Exception as e:
+    AZURE_INIT_ERROR = str(e)
     logger.error(f"❌ Failed to initialize Azure Blob Storage: {str(e)}")
     logger.error("")
-    logger.error("REQUIRED: Set ONE of these credential sets in Render Environment:")
+    logger.error("=" * 70)
+    logger.error("AZURE BLOB STORAGE SETUP REQUIRED")
+    logger.error("=" * 70)
     logger.error("")
-    logger.error("Option 1 (RECOMMENDED):")
-    logger.error("  AZURE_STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net")
+    logger.error("Set ONE of these credential sets in Render Environment tab:")
     logger.error("")
-    logger.error("Option 2:")
-    logger.error("  AZURE_ACCOUNT_NAME=yourstorageaccount")
-    logger.error("  AZURE_ACCOUNT_KEY=your_account_key_here")
+    logger.error("Option 1 (RECOMMENDED - Connection String):")
+    logger.error("  Variable: AZURE_STORAGE_CONNECTION_STRING")
+    logger.error("  Value: DefaultEndpointsProtocol=https;AccountName=YOURNAME;AccountKey=YOURKEY;EndpointSuffix=core.windows.net")
+    logger.error("  Get from: Azure Portal → Storage Account → Access Keys → Connection String")
     logger.error("")
-    logger.error("Option 3:")
-    logger.error("  AZURE_ACCOUNT_NAME=yourstorageaccount")
-    logger.error("  AZURE_SAS_TOKEN=sv=2021-06-08&ss=bfqt&srt=sco&sp=rwdlacupiytfx...")
+    logger.error("Option 2 (Account Key):")
+    logger.error("  Variables:")
+    logger.error("    AZURE_ACCOUNT_NAME=yourstorageaccountname")
+    logger.error("    AZURE_ACCOUNT_KEY=your_base64_key_here==")
+    logger.error("  Get from: Azure Portal → Storage Account → Access Keys")
     logger.error("")
-    raise
+    logger.error("Option 3 (SAS Token):")
+    logger.error("  Variables:")
+    logger.error("    AZURE_ACCOUNT_NAME=yourstorageaccountname")
+    logger.error("    AZURE_SAS_TOKEN=sv=2021-06-08&ss=bfqt&srt=sco&sp=rwdlacupiytfx...")
+    logger.error("  Get from: Azure Portal → Storage Account → Shared Access Signature")
+    logger.error("")
+    logger.error("=" * 70)
+    logger.warning("")
+    logger.warning("⚠️  Application will start but file operations will fail until configured")
+    logger.warning("")
+    # Don't raise - let app start but warn about missing storage
 
 
 # ========== VALIDATION ==========
@@ -146,7 +177,11 @@ def verify_ownership(blob_name: str, user_id: str) -> None:
 def get_container_client():
     """Get container client"""
     if not blob_service_client:
-        raise HTTPException(500, "Azure Blob Storage not initialized")
+        raise HTTPException(
+            503,
+            f"Azure Blob Storage not initialized. {AZURE_INIT_ERROR or 'Missing credentials'}. "
+            "Contact administrator to configure Azure Storage environment variables."
+        )
     return blob_service_client.get_container_client(CONTAINER_NAME)
 
 
