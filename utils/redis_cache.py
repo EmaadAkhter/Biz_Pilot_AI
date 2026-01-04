@@ -73,13 +73,6 @@ class RedisCache:
         """Initialize Redis connection with retry logic"""
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                # Configure SSL properly for Azure
-                ssl_context = None
-                if REDIS_SSL:
-                    ssl_context = ssl.create_default_context()
-                    ssl_context.check_hostname = False
-                    ssl_context.verify_mode = ssl.CERT_REQUIRED
-
                 # Build keepalive options (Linux/Unix only)
                 keepalive_opts = None
                 if hasattr(socket, 'TCP_KEEPIDLE'):
@@ -89,27 +82,37 @@ class RedisCache:
                         socket.TCP_KEEPCNT: 3
                     }
 
-                # Create connection pool (critical for performance)
-                self.pool = ConnectionPool(
-                    host=REDIS_HOST,
-                    port=REDIS_PORT,
-                    password=REDIS_PASSWORD,
-                    ssl=REDIS_SSL,
-                    ssl_cert_reqs=ssl.CERT_REQUIRED if REDIS_SSL else None,
-                    ssl_ca_certs=None,  # Uses system CA bundle
-                    decode_responses=True,
-                    socket_connect_timeout=CONNECT_TIMEOUT,
-                    socket_timeout=SOCKET_TIMEOUT,
-                    socket_keepalive=True,
-                    socket_keepalive_options=keepalive_opts,
-                    retry_on_timeout=True,
-                    retry_on_error=[redis.ConnectionError, redis.TimeoutError],
-                    retry=redis.retry.Retry(redis.backoff.ExponentialBackoff(), 3),
-                    health_check_interval=30,
-                    max_connections=50,  # Pool size
-                    encoding='utf-8'
-                )
+                # Redis 7.x SSL configuration - different API than 4.x/5.x
+                connection_kwargs = {
+                    "host": REDIS_HOST,
+                    "port": REDIS_PORT,
+                    "password": REDIS_PASSWORD,
+                    "decode_responses": True,
+                    "socket_connect_timeout": CONNECT_TIMEOUT,
+                    "socket_timeout": SOCKET_TIMEOUT,
+                    "socket_keepalive": True,
+                    "socket_keepalive_options": keepalive_opts,
+                    "retry_on_timeout": True,
+                    "retry_on_error": [redis.ConnectionError, redis.TimeoutError],
+                    "retry": redis.retry.Retry(redis.backoff.ExponentialBackoff(), 3),
+                    "health_check_interval": 30,
+                    "max_connections": 50,
+                    "encoding": "utf-8"
+                }
 
+                # Add SSL configuration for Azure Redis
+                if REDIS_SSL:
+                    ssl_context = ssl.create_default_context()
+                    ssl_context.check_hostname = False
+                    ssl_context.verify_mode = ssl.CERT_REQUIRED
+                    
+                    # Redis 7.x uses ssl_context parameter instead of ssl
+                    connection_kwargs["ssl"] = True
+                    connection_kwargs["ssl_cert_reqs"] = ssl.CERT_REQUIRED
+                    connection_kwargs["ssl_check_hostname"] = False
+
+                # Create connection pool
+                self.pool = ConnectionPool(**connection_kwargs)
                 self.client = redis.Redis(connection_pool=self.pool)
                 
                 # Test connection with timeout
