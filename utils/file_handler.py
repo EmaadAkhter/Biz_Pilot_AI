@@ -30,11 +30,11 @@ ALLOWED_EXTENSIONS = {'.csv', '.xlsx', '.xls'}
 if not AZURE_ACCOUNT_NAME or not AZURE_SAS_TOKEN:
     raise ValueError("Missing AZURE_ACCOUNT_NAME or AZURE_SAS_TOKEN in environment variables")
 
-account_url = f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net?{AZURE_SAS_TOKEN}"
+account_url = f"https://{AZURE_ACCOUNT_NAME}.blob.core.windows.net"
 logger.info(f"Initializing Azure Blob Storage: {AZURE_ACCOUNT_NAME}")
 
 try:
-    blob_service_client = BlobServiceClient(account_url=account_url)
+    blob_service_client = BlobServiceClient(account_url=account_url, credential=AZURE_SAS_TOKEN)
 except Exception as e:
     logger.error(f"Failed to initialize BlobServiceClient: {str(e)}")
     raise
