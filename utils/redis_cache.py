@@ -82,7 +82,7 @@ class RedisCache:
                         socket.TCP_KEEPCNT: 3
                     }
 
-                # Redis 7.x SSL configuration - different API than 4.x/5.x
+                # Base connection parameters (compatible with redis 7.x)
                 connection_kwargs = {
                     "host": REDIS_HOST,
                     "port": REDIS_PORT,
@@ -93,26 +93,26 @@ class RedisCache:
                     "socket_keepalive": True,
                     "socket_keepalive_options": keepalive_opts,
                     "retry_on_timeout": True,
-                    "retry_on_error": [redis.ConnectionError, redis.TimeoutError],
-                    "retry": redis.retry.Retry(redis.backoff.ExponentialBackoff(), 3),
                     "health_check_interval": 30,
                     "max_connections": 50,
                     "encoding": "utf-8"
                 }
 
-                # Add SSL configuration for Azure Redis
+                # For redis 7.x with SSL (Azure), use SSLConnection class
                 if REDIS_SSL:
-                    ssl_context = ssl.create_default_context()
-                    ssl_context.check_hostname = False
-                    ssl_context.verify_mode = ssl.CERT_REQUIRED
+                    from redis.connection import SSLConnection
                     
-                    # Redis 7.x uses ssl_context parameter instead of ssl
-                    connection_kwargs["ssl"] = True
-                    connection_kwargs["ssl_cert_reqs"] = ssl.CERT_REQUIRED
-                    connection_kwargs["ssl_check_hostname"] = False
+                    # Create SSL connection pool with proper connection class
+                    self.pool = ConnectionPool(
+                        connection_class=SSLConnection,
+                        ssl_cert_reqs=ssl.CERT_REQUIRED,
+                        ssl_check_hostname=False,
+                        **connection_kwargs
+                    )
+                else:
+                    # Non-SSL connection pool
+                    self.pool = ConnectionPool(**connection_kwargs)
 
-                # Create connection pool
-                self.pool = ConnectionPool(**connection_kwargs)
                 self.client = redis.Redis(connection_pool=self.pool)
                 
                 # Test connection with timeout
