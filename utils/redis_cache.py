@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import ssl
+import socket
 from typing import Optional, Any, Dict, List
 from datetime import datetime, date
 from decimal import Decimal
@@ -79,6 +80,15 @@ class RedisCache:
                     ssl_context.check_hostname = False
                     ssl_context.verify_mode = ssl.CERT_REQUIRED
 
+                # Build keepalive options (Linux/Unix only)
+                keepalive_opts = None
+                if hasattr(socket, 'TCP_KEEPIDLE'):
+                    keepalive_opts = {
+                        socket.TCP_KEEPIDLE: 60,
+                        socket.TCP_KEEPINTVL: 10,
+                        socket.TCP_KEEPCNT: 3
+                    }
+
                 # Create connection pool (critical for performance)
                 self.pool = ConnectionPool(
                     host=REDIS_HOST,
@@ -91,11 +101,7 @@ class RedisCache:
                     socket_connect_timeout=CONNECT_TIMEOUT,
                     socket_timeout=SOCKET_TIMEOUT,
                     socket_keepalive=True,
-                    socket_keepalive_options={
-                        socket.TCP_KEEPIDLE: 60,
-                        socket.TCP_KEEPINTVL: 10,
-                        socket.TCP_KEEPCNT: 3
-                    } if hasattr(socket, 'TCP_KEEPIDLE') else None,
+                    socket_keepalive_options=keepalive_opts,
                     retry_on_timeout=True,
                     retry_on_error=[redis.ConnectionError, redis.TimeoutError],
                     retry=redis.retry.Retry(redis.backoff.ExponentialBackoff(), 3),
