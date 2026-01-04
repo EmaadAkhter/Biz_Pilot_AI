@@ -29,7 +29,7 @@ FORECAST_TTL = 3600  # 1 hour
 # Connection settings
 MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
-CONNECT_TIMEOUT = 15  # increased for Azure SSL
+CONNECT_TIMEOUT = 30  # increased for Azure SSL
 SOCKET_TIMEOUT = 10
 
 if not REDIS_HOST or not REDIS_PASSWORD:
