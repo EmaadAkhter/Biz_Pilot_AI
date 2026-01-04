@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ========== CONFIG ==========
 AZURE_ACCOUNT_NAME = os.getenv("AZURE_ACCOUNT_NAME")
 AZURE_SAS_TOKEN = os.getenv("AZURE_SAS_TOKEN")
-CONTAINER_NAME = "user-file-date"
+CONTAINER_NAME = "salesdata"
 MAX_FILE_SIZE = 100 * 1024 * 1024
 ALLOWED_EXTENSIONS = {'.csv', '.xlsx', '.xls'}
 
