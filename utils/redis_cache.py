@@ -1,10 +1,12 @@
 import os
 import json
 import logging
-import hashlib
-from typing import Optional, Any, Dict
-from datetime import timedelta
+import ssl
+from typing import Optional, Any, Dict, List
+from datetime import datetime, date
+from decimal import Decimal
 import redis
+from redis.connection import ConnectionPool
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -23,6 +25,12 @@ FILE_LIST_TTL = 300  # 5 minutes
 USER_TTL = 7200  # 2 hours
 FORECAST_TTL = 3600  # 1 hour
 
+# Connection settings
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds
+CONNECT_TIMEOUT = 15  # increased for Azure SSL
+SOCKET_TIMEOUT = 10
+
 if not REDIS_HOST or not REDIS_PASSWORD:
     logger.warning("Redis credentials not found. Cache will be disabled.")
     REDIS_ENABLED = False
@@ -30,43 +38,112 @@ else:
     REDIS_ENABLED = True
 
 
+class CustomJSONEncoder(json.JSONEncoder):
+    """Handle non-serializable types common in analytics"""
+    def default(self, obj):
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+        if isinstance(obj, Decimal):
+            return float(obj)
+        # Handle numpy types if numpy is available
+        try:
+            import numpy as np
+            if isinstance(obj, (np.integer, np.floating)):
+                return obj.item()
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+        except ImportError:
+            pass
+        return super().default(obj)
+
+
 class RedisCache:
-    """Azure Redis Cache manager with automatic fallback"""
+    """Azure Redis Cache manager with automatic fallback and retry logic"""
 
     def __init__(self):
         self.client = None
+        self.pool = None
         self.enabled = REDIS_ENABLED
 
         if self.enabled:
+            self._initialize_connection()
+
+    def _initialize_connection(self) -> None:
+        """Initialize Redis connection with retry logic"""
+        for attempt in range(1, MAX_RETRIES + 1):
             try:
-                self.client = redis.Redis(
+                # Configure SSL properly for Azure
+                ssl_context = None
+                if REDIS_SSL:
+                    ssl_context = ssl.create_default_context()
+                    ssl_context.check_hostname = False
+                    ssl_context.verify_mode = ssl.CERT_REQUIRED
+
+                # Create connection pool (critical for performance)
+                self.pool = ConnectionPool(
                     host=REDIS_HOST,
                     port=REDIS_PORT,
                     password=REDIS_PASSWORD,
                     ssl=REDIS_SSL,
-                    ssl_cert_reqs=None,
+                    ssl_cert_reqs=ssl.CERT_REQUIRED if REDIS_SSL else None,
+                    ssl_ca_certs=None,  # Uses system CA bundle
                     decode_responses=True,
-                    socket_connect_timeout=5,
-                    socket_timeout=5,
+                    socket_connect_timeout=CONNECT_TIMEOUT,
+                    socket_timeout=SOCKET_TIMEOUT,
+                    socket_keepalive=True,
+                    socket_keepalive_options={
+                        socket.TCP_KEEPIDLE: 60,
+                        socket.TCP_KEEPINTVL: 10,
+                        socket.TCP_KEEPCNT: 3
+                    } if hasattr(socket, 'TCP_KEEPIDLE') else None,
                     retry_on_timeout=True,
-                    health_check_interval=30
+                    retry_on_error=[redis.ConnectionError, redis.TimeoutError],
+                    retry=redis.retry.Retry(redis.backoff.ExponentialBackoff(), 3),
+                    health_check_interval=30,
+                    max_connections=50,  # Pool size
+                    encoding='utf-8'
                 )
-                # Test connection
+
+                self.client = redis.Redis(connection_pool=self.pool)
+                
+                # Test connection with timeout
                 self.client.ping()
-                logger.info(f"✓ Redis connected: {REDIS_HOST}")
+                logger.info(f"✓ Redis connected: {REDIS_HOST} (attempt {attempt})")
+                return
+
+            except (redis.ConnectionError, redis.TimeoutError) as e:
+                logger.warning(f"Redis connection attempt {attempt}/{MAX_RETRIES} failed: {str(e)}")
+                if attempt < MAX_RETRIES:
+                    import time
+                    time.sleep(RETRY_DELAY * attempt)  # Exponential backoff
+                else:
+                    logger.error(f"Redis connection failed after {MAX_RETRIES} attempts. Disabling cache.")
+                    self.enabled = False
+                    self.client = None
+                    self.pool = None
+
             except Exception as e:
-                logger.error(f"Redis connection failed: {str(e)}")
+                logger.error(f"Unexpected Redis error: {str(e)}")
                 self.enabled = False
                 self.client = None
+                self.pool = None
+                break
 
     def _generate_key(self, prefix: str, *args) -> str:
         """Generate cache key from prefix and arguments"""
         key_parts = [prefix] + [str(arg) for arg in args]
-        key_string = ":".join(key_parts)
-        return key_string
+        return ":".join(key_parts)
+
+    def _serialize(self, value: Any) -> str:
+        """Serialize value with custom encoder"""
+        return json.dumps(value, cls=CustomJSONEncoder)
+
+    def _deserialize(self, value: str) -> Any:
+        """Deserialize value"""
+        return json.loads(value)
 
     def get(self, key: str) -> Optional[Any]:
-        """Get value from cache"""
+        """Get value from cache with error handling"""
         if not self.enabled or not self.client:
             return None
 
@@ -74,8 +151,15 @@ class RedisCache:
             value = self.client.get(key)
             if value:
                 logger.debug(f"Cache HIT: {key}")
-                return json.loads(value)
+                return self._deserialize(value)
             logger.debug(f"Cache MISS: {key}")
+            return None
+        except (redis.ConnectionError, redis.TimeoutError) as e:
+            logger.error(f"Redis connection error for GET {key}: {str(e)}")
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON decode error for {key}: {str(e)}")
+            self.delete(key)  # Remove corrupted data
             return None
         except Exception as e:
             logger.error(f"Redis GET error for {key}: {str(e)}")
@@ -87,10 +171,16 @@ class RedisCache:
             return False
 
         try:
-            serialized = json.dumps(value)
+            serialized = self._serialize(value)
             self.client.setex(key, ttl, serialized)
             logger.debug(f"Cache SET: {key} (TTL: {ttl}s)")
             return True
+        except (redis.ConnectionError, redis.TimeoutError) as e:
+            logger.error(f"Redis connection error for SET {key}: {str(e)}")
+            return False
+        except (TypeError, ValueError) as e:
+            logger.error(f"Serialization error for {key}: {str(e)}")
+            return False
         except Exception as e:
             logger.error(f"Redis SET error for {key}: {str(e)}")
             return False
@@ -108,18 +198,42 @@ class RedisCache:
             logger.error(f"Redis DELETE error for {key}: {str(e)}")
             return False
 
-    def delete_pattern(self, pattern: str) -> int:
-        """Delete all keys matching pattern"""
+    def delete_pattern(self, pattern: str, batch_size: int = 100) -> int:
+        """
+        Delete all keys matching pattern using SCAN (non-blocking)
+        
+        CRITICAL FIX: Uses SCAN instead of KEYS to avoid blocking Redis
+        """
         if not self.enabled or not self.client:
             return 0
 
         try:
-            keys = self.client.keys(pattern)
-            if keys:
-                count = self.client.delete(*keys)
-                logger.debug(f"Cache DELETE pattern {pattern}: {count} keys")
-                return count
-            return 0
+            count = 0
+            cursor = 0
+            
+            while True:
+                # Use SCAN for non-blocking iteration
+                cursor, keys = self.client.scan(
+                    cursor=cursor, 
+                    match=pattern, 
+                    count=batch_size
+                )
+                
+                if keys:
+                    # Delete in batches using pipeline
+                    pipe = self.client.pipeline()
+                    for key in keys:
+                        pipe.delete(key)
+                    pipe.execute()
+                    count += len(keys)
+                
+                # cursor returns to 0 when iteration is complete
+                if cursor == 0:
+                    break
+            
+            logger.debug(f"Cache DELETE pattern {pattern}: {count} keys")
+            return count
+            
         except Exception as e:
             logger.error(f"Redis DELETE pattern error for {pattern}: {str(e)}")
             return 0
@@ -148,16 +262,17 @@ class RedisCache:
             return None
 
     def increment(self, key: str, amount: int = 1, ttl: int = DEFAULT_TTL) -> Optional[int]:
-        """Increment counter"""
+        """Increment counter atomically"""
         if not self.enabled or not self.client:
             return None
 
         try:
-            value = self.client.incr(key, amount)
-            # Set TTL if key is new
-            if value == amount:
-                self.client.expire(key, ttl)
-            return value
+            # Use pipeline for atomic operation
+            pipe = self.client.pipeline()
+            pipe.incr(key, amount)
+            pipe.expire(key, ttl)
+            results = pipe.execute()
+            return results[0]
         except Exception as e:
             logger.error(f"Redis INCR error for {key}: {str(e)}")
             return None
@@ -173,6 +288,7 @@ class RedisCache:
                 "enabled": True,
                 "status": "connected",
                 "used_memory_mb": round(info.get("used_memory", 0) / (1024 * 1024), 2),
+                "used_memory_peak_mb": round(info.get("used_memory_peak", 0) / (1024 * 1024), 2),
                 "connected_clients": info.get("connected_clients", 0),
                 "total_commands_processed": info.get("total_commands_processed", 0),
                 "keyspace_hits": info.get("keyspace_hits", 0),
@@ -181,7 +297,8 @@ class RedisCache:
                     info.get("keyspace_hits", 0),
                     info.get("keyspace_misses", 0)
                 ),
-                "uptime_seconds": info.get("uptime_in_seconds", 0)
+                "uptime_seconds": info.get("uptime_in_seconds", 0),
+                "evicted_keys": info.get("evicted_keys", 0)
             }
         except Exception as e:
             logger.error(f"Redis stats error: {str(e)}")
@@ -204,6 +321,20 @@ class RedisCache:
         except Exception as e:
             logger.error(f"Redis FLUSH error: {str(e)}")
             return False
+
+    def close(self) -> None:
+        """Properly close Redis connection and pool"""
+        if self.client:
+            try:
+                self.client.close()
+            except:
+                pass
+        if self.pool:
+            try:
+                self.pool.disconnect()
+            except:
+                pass
+        logger.info("Redis connection closed")
 
 
 # ========== GLOBAL INSTANCE ==========
@@ -294,7 +425,7 @@ def invalidate_user(user_id: str) -> bool:
 def track_api_usage(user_id: str, endpoint: str) -> Optional[int]:
     """Track API usage with rate limiting"""
     key = cache._generate_key("api_usage", user_id, endpoint)
-    return cache.increment(key, ttl=3600)  # Reset hourly
+    return cache.increment(key, ttl=3600)
 
 
 def get_api_usage(user_id: str, endpoint: str) -> int:
