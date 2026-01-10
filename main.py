@@ -36,7 +36,7 @@ app = FastAPI(title="BizPilot AI Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://biz-piloz-ai-agent.vercel.app","https://biz-piloz-ai-agent.vercel.app/"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
